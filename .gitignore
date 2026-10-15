@@ -1,0 +1,22 @@
+node_modules/
+*.log
+npm-debug.log*
+.npm/
+.npmrc
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local scratch / backup files that must never ship
+*.orig
+*.bak
+*.rej
+*.tmp
+_pub_prep/
+_publish/
+_release/
+
+# Editor
+.vscode/
+.idea/
+*.swp

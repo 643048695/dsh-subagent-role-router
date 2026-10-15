@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Run tests
+        run: npm test
+
+  manifest:
+    name: plugin manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # The plugin market refuses any repository whose root package.json does
+      # not declare `dsh.bundle` — "declares only `dsh.client` — that alone is
+      # not installable". Checking it here keeps that failure off the PR.
+      - name: package.json declares dsh.bundle and a patch file
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const patch = pkg?.dsh?.bundle?.patch;
+            if (!patch) {
+              console.error("package.json is missing dsh.bundle.patch");
+              process.exit(1);
+            }
+            if (!fs.existsSync(patch)) {
+              console.error(`dsh.bundle.patch points at a missing file: ${patch}`);
+              process.exit(1);
+            }
+            const entry = pkg.main ?? pkg.exports?.["."];
+            if (!entry || !fs.existsSync(entry)) {
+              console.error(`package entry does not exist: ${entry}`);
+              process.exit(1);
+            }
+            console.log(`ok: dsh.bundle.patch=${patch}`);
+          '
+
+      - name: cordis.patch.yml names this plugin
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const yml = fs.readFileSync(pkg.dsh.bundle.patch, "utf8");
+            if (!yml.includes(pkg.name)) {
+              console.error(`bundle patch does not mention the package name ${pkg.name}`);
+              process.exit(1);
+            }
+            console.log(`ok: bundle patch mentions ${pkg.name}`);
+          '

@@ -1,0 +1,110 @@
+{
+  "name": "dsh-subagent-role-router",
+  "version": "3.0.0",
+  "description": "Route DSH subagent delegations to configured models: 3-role routing (explore / plan / patch), round-robin or random distribution, cross-provider failover, fork window slicing, and agent-teams exemption.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "subagent",
+    "agent",
+    "model-routing",
+    "role-routing",
+    "round-robin",
+    "failover",
+    "provider-failover",
+    "fork",
+    "route-visibility",
+    "prompt-injection"
+  ],
+  "author": "643048695",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/643048695/dsh-subagent-role-router.git"
+  },
+  "homepage": "https://github.com/643048695/dsh-subagent-role-router#readme",
+  "bugs": {
+    "url": "https://github.com/643048695/dsh-subagent-role-router/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "icon": "icons/plugin-icon-128.png",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "icons",
+    "cordis.patch.yml",
+    "LICENSE",
+    "README.md",
+    "README.en.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": ">=3.18.1 <4.0.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-settings": ">=0.1.7-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-subagent": ">=0.1.7-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-llm": ">=0.1.7-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-client-connection": ">=0.1.7-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-client-locale": ">=0.1.7-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.1.7-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-client-ui-primitives": ">=0.1.7-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-client-ui-conversation": ">=0.1.7-rc.1 <0.3.0-0",
+    "@deepseek-ai/dsh-client-ui-settings": ">=0.1.7-rc.1 <0.3.0-0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-client-connection": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-locale": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-slots": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-primitives": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-conversation": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-settings": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4",
+    "@deepseek-ai/dsh-session": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-settings": "^0.1.7-rc.1",
+    "@deepseek-ai/schemastery": "3.18.4"
+  }
+}
