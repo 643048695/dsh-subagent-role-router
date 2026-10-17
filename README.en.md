@@ -115,6 +115,8 @@ This is the project's second addition, and it addresses this: **in a long sessio
 
 **The fix**: `forkWindowSlicing` (on by default) takes only the most recent `forkWindowTurns` turns (3 by default) as the seed before a fork delegation, and rebuilds them into a legal event sequence numbered contiguously from `seq: 0`. Measured on a 60-turn session, the seed drops from ~25MB to ~5KB.
 
+**Where it hooks in**: the DSH 0.2.x fork backend (`@deepseek-ai/dsh-subagent-fork-in-process`) exposes exactly **one** method, `prepareContinuable(request)`, which returns `{ seed }` — the parent's full event prefix. There is no `start`, and no separate driver package to route around. So the plugin wraps just that one method: it takes the returned `{ seed }`, rewrites it, and hands it back. That is cleaner than the 0.1.x approach of calling the driver itself behind the provider's back — it does not duplicate the host's launch logic, so it cannot drift when the host implementation changes.
+
 **Paranoid boundary handling** — slicing reorders events, and an incomplete mapping would produce a **corrupt context**, which is far worse than being slow. So the plugin **always gives up and falls back to native behavior** when:
 
 - the parent events contain no complete `turn/end` (generation in progress);
@@ -152,7 +154,13 @@ dsh plugin --profile desktop add /path/to/dsh-subagent-role-router
 
 ## Host version requirements
 
-All 9 `@deepseek-ai/*` peers are declared as **`>=0.1.7-rc.1 <0.3.0-0`**: the 0.1.7 line and the whole **0.2.x line** after it (both prereleases and stable releases), with nothing declared for 0.3.0 and up.
+All 9 `@deepseek-ai/*` peers are declared as:
+
+```
+>=0.1.7-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.2.1-0 || >=0.2.1-rc.1 <0.3.0-0
+```
+
+That is the **0.1.7 line + the 0.2.0 line + the 0.2.1 line**, with nothing declared for `0.3.0` and up. **The host version verified today is DSH `0.2.1-rc.2`.**
 
 To understand why the range looks like this, you need to know **how DSH validates** it. `@deepseek-ai/dsh-app-boot` runs, for every `@deepseek-ai/dsh` / `dsh-*` peer:
 
@@ -162,13 +170,23 @@ semver.satisfies(runtimeVersion, range, { includePrerelease: true })
 
 `includePrerelease: true` **disables semver's prerelease tuple rule** — a prerelease is no longer rejected for lacking a same-tuple carrier, and is instead compared by normal ordering. Two consequences are counter-intuitive:
 
-| Upper bound | `0.2.0-rc.1` | `0.2.0` (stable) | Note |
+| Upper bound | `0.2.1-rc.2` | `0.2.1` (stable) | Note |
 | --- | --- | --- | --- |
-| `<0.2.0` | ✅ admitted | ❌ **rejected** | The worst combination: prereleases install, and the stable release pulls the bundle out |
+| `<0.2.1` | ✅ admitted | ❌ **rejected** | The worst combination: prereleases install, and the stable release pulls the bundle out |
 | `<0.3.0` | ✅ | ✅ | But it also admits `0.3.0-rc.1`, beyond the verified range |
 | **`<0.3.0-0`** | ✅ | ✅ | Recommended: all of 0.2.x admitted, `0.3.0-rc.1` still blocked |
 
 A wrong upper bound does **not** degrade gracefully: `loadProfileDirectory()` throws on an incompatible bundle, the bundle lands in `skippedBundles`, and startup writes `skipping profile bundle "dsh-subagent-role-router"` to stderr — the plugin and its settings card **both disappear**.
+
+**Why three branches instead of one `>=0.1.7-rc.1 <0.3.0-0`?** Because npm resolves peers **without** `includePrerelease`, and semver's default rule requires a prerelease to be caught explicitly by a comparator from the **same tuple** (`0.2.1-rc.x` belongs to the `0.2.1` tuple). A single wide range silently misses prerelease hosts such as `0.2.0-rc.1` and `0.2.1-rc.2` — the plugin would still load, but `npm install` reports `ERESOLVE`. Split into branches, the host check (lenient) and npm resolution (strict) **both pass**:
+
+| Host version | Host `includePrerelease:true` | npm default strict mode |
+| --- | --- | --- |
+| `0.1.7-rc.2` | ✅ | ✅ |
+| `0.2.0-rc.1` | ✅ | ✅ |
+| `0.2.1-rc.2` | ✅ | ✅ |
+| `0.2.5` / `0.2.1` | ✅ | ✅ |
+| `0.3.0-rc.1` | ❌ blocked | ❌ blocked |
 
 ## Configuration
 
@@ -240,21 +258,19 @@ You can also edit the profile's patch file `~/.dsh/profiles/<profile>/cordis.pat
 ## Tests
 
 ```sh
+npm install
 npm test
 ```
 
-Three groups:
+**24 cases**, in three groups:
 
 - `test/fork-window.test.mjs` — window slicing mapping and safe fallback, validating seed contiguity against the real DSH `Session`.
-- `test/router-audit.test.mjs` — role detection, explicit override preservation, round-robin once per child, team exemption, unload restoration, main session unaffected.
+- `test/router-audit.test.mjs` — role detection, explicit override preservation, round-robin once per child, team exemption, unload restoration, main session unaffected, and **a 0.2.x-shaped fork backend (only `prepareContinuable`, no `start`) still gets sliced**.
 - `test/client-audit.test.mjs` — settings-card form validation, `forkWindowTurns` bounds and serialization, notice toggle sync, subscription and timer cleanup.
 
-> `fork-window.test.mjs` depends on the DSH host package `@deepseek-ai/dsh-session`. DSH Desktop packs it inside `app.asar`, which plain Node cannot resolve; run the tests with DSH's bundled Electron:
+> `fork-window.test.mjs` needs a **real** `@deepseek-ai/dsh-session`. `tools/dsh-session-resolver.mjs` looks in order: the `DSH_SESSION_PATH` environment variable → the `node_modules` dependency (hit right after `npm install`) → `~/.dsh/profiles/*/node_modules` → the platform DSH Desktop install directory.
 >
-> ```powershell
-> $env:ELECTRON_RUN_AS_NODE='1'
-> & 'C:\Users\<you>\AppData\Local\Programs\DeepSeek Harness\DeepSeek Harness.exe' --test
-> ```
+> **When it cannot be found, that group `skip`s instead of failing** — not reaching the object under test is not the same as the code being wrong, and reporting it red only trains people to ignore red output. Set `DSH_SESSION_PATH` to pin an explicit path.
 
 ## License
 

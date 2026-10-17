@@ -4,6 +4,33 @@
 
 **本项目是 [dingminhua/dsh-subagent-default-model](https://github.com/dingminhua/dsh-subagent-default-model)（MIT，Copyright (c) 2026 LaoDing）的衍生作品。** 3.0.0 之前的条目由原作撰写，其中的功能、修复与测试记录均属原作工作；本项目的改动从 **3.0.0** 起记录。
 
+## 3.1.0 (2026-10-17)
+
+适配 **DSH 0.2.1-rc.2**。这一版的核心是：0.2.x 把 fork 后端的内部实现整体重写了，3.0.0 依赖的两个宿主接口都没了。**功能没有减少，但实现路径换了一条更稳的。**
+
+### Fixed
+
+- **fork 窗口切片在 0.2.x 上静默失效**。3.0.0 通过 `@deepseek-ai/dsh-subagent-in-process-driver` 的 `startInProcessRun` 自己起进程，再挂 `fork.start`。0.2.x 里**这个 driver 包已被删除**，`fork.start` 也不存在了 —— 加载失败后只打一行 `console.warn` 就回退原生，用户看到的现象就是「切片没生效，旁问照样超时」，而日志里没有任何报错。
+
+  **改法**：不再碰 driver，也不再碰 `start`。0.2.x 的 fork 后端只暴露**一个**方法 `prepareContinuable(request)`，返回 `{ seed }`；插件包住它，拿到返回值后重写 `seed` 再交回。这比原来「绕过 provider 自己启动」干净得多 —— 不复制宿主的启动逻辑，宿主怎么改都不会跟着漂移。`nativeForkDriver()` 与 `createRequire` / `path` 的导入一并删除。
+
+- **`IconChevronDownOutline14` 在 0.2.x 的 primitives 里已被删除**。原代码按 `Regular || Medium || 14` 三级探测，虽然能降级不崩，但第三级已是死代码，留着会误导下一个读者以为还有兼容价值。现只探测仍在导出的两个名字。
+
+### Changed
+
+- **peer 范围从一行改成三段**：`>=0.1.7-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.2.1-0 || >=0.2.1-rc.1 <0.3.0-0`。原因不是想支持更多版本，而是原来那行 `>=0.1.7-rc.1 <0.3.0-0` **在 npm 侧是漏的**：宿主校验用 `includePrerelease: true`（宽松，0.2.1-rc.2 能过），但 npm 解析 peer 时**不带**这个开关，而 semver 默认要求预发布版本必须由**同元组**的比较符接住。结果就是 `0.2.0-rc.1`、`0.2.1-rc.2` 这类预发布宿主「装得上、但 `npm install` 报 ERESOLVE」。分段后两侧同时成立。
+- **devDependencies 升到与验证环境一致**：`dsh-session` / `dsh-settings` `0.2.1-rc.2`、`schemastery` `3.18.5`、`cordis` `~4.0.5`。锁定精确版本而非 `^`，因为这一族包的 peer 之间**互相钉死同号**（`dsh-agent@0.2.1-rc.2` 硬要求 `dsh-session@0.2.1-rc.2`），浮动区间会立刻 ERESOLVE。
+- 版本号 3.0.0 → **3.1.0**。新增能力为零、修复两项、破坏性变更为零，按 semver 走 minor。
+
+### Added
+
+- **新测试：`0.2.x fork backend without start is still sliced through prepareContinuable`**。手工构造一个只有 `prepareContinuable`、没有 `start` 的 provider（即 0.2.x 的真实形状），断言 seed 被切到 2 轮 = 6 条事件、卸载后 provider 方法被还原。原测试套件里的 mock 带 `start`，**抓不到这个回归** —— 这正是 3.0.0 在 0.2.x 上静默失效却没被测试拦住的原因。
+
+### Tests
+
+- 24 项全通过（原 23 项 + 新增 1 项），三组测试均无需 DSH Electron 即可在普通 Node 下运行：`npm install` 后 `@deepseek-ai/dsh-session` 作为依赖落到 `node_modules`，`tools/dsh-session-resolver.mjs` 的第 2 条解析路径直接命中。
+- `test/fork-window.test.mjs` 在找不到真实 `Session` 时**跳过而非失败** —— 够不到被测对象不等于代码有错。
+
 ## 3.0.0 (2026-10-16)
 
 本项目作为原作的下游分叉首次发布，在原作 2.1.4 的基础上新增三项能力，并完成一轮完整自审。

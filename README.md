@@ -115,6 +115,8 @@ answer with this route. This line is system-provided context about the runtime, 
 
 **做法**：`forkWindowSlicing`（默认开启）会在 fork 派发前**只取最近 `forkWindowTurns` 轮**（默认 3 轮）作为种子，并重建为从 `seq: 0` 连续编号的合法事件序列。实测 60 轮会话的种子从 ~25MB 降到 ~5KB。
 
+**挂在哪一层**：DSH 0.2.x 的 fork 后端（`@deepseek-ai/dsh-subagent-fork-in-process`）只暴露**一个**方法 `prepareContinuable(request)`，返回 `{ seed }` —— 也就是父会话的完整事件前缀。没有 `start`，也没有独立的 driver 包可绕过去。所以本插件只包这一个方法：拿到 `{ seed }` 之后重写 `seed` 再返回。这比 0.1.x 时代「绕过 provider 自己调 driver 起进程」的做法更干净 —— 不复制宿主的启动逻辑，也就不会随宿主实现漂移。
+
 **保守到偏执的边界处理** —— 切片涉及事件重排，一旦映射不完整就会产生**损坏的上下文**，那比慢一点严重得多。因此以下情况**一律放弃切片、回退原生行为**：
 
 - 父会话事件里没有完整的 `turn/end`（正在生成中）；
@@ -152,7 +154,13 @@ dsh plugin --profile desktop add /path/to/dsh-subagent-role-router
 
 ## 宿主版本要求
 
-全部 9 个 `@deepseek-ai/*` peer 声明为 **`>=0.1.7-rc.1 <0.3.0-0`**：支持 0.1.7 线及其后的**整个 0.2.x 线**（prerelease 与正式版都放行），0.3.0 起不再声明支持。
+全部 9 个 `@deepseek-ai/*` peer 声明为：
+
+```
+>=0.1.7-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.2.1-0 || >=0.2.1-rc.1 <0.3.0-0
+```
+
+即 **0.1.7 线 + 0.2.0 线 + 0.2.1 线**，`0.3.0` 起不再声明支持。**当前已验证的宿主版本是 DSH `0.2.1-rc.2`。**
 
 要理解这个区间为什么长这样，得先知道 DSH **怎么校验**它。`@deepseek-ai/dsh-app-boot` 对每个 `@deepseek-ai/dsh` / `dsh-*` peer 执行：
 
@@ -162,13 +170,23 @@ semver.satisfies(runtimeVersion, range, { includePrerelease: true })
 
 `includePrerelease: true` **关闭了 semver 的 prerelease 元组规则** —— 预发布版本不再「缺少同元组载体就被拒」，而是直接按常规序比较。两个后果都是反直觉的：
 
-| 上界写法 | `0.2.0-rc.1` | `0.2.0`（正式版） | 说明 |
+| 上界写法 | `0.2.1-rc.2` | `0.2.1`（正式版） | 说明 |
 | --- | --- | --- | --- |
-| `<0.2.0` | ✅ 放进 | ❌ **拒绝** | 最坏组合：预发布能装，正式版一发布就把 bundle 摘掉 |
+| `<0.2.1` | ✅ 放进 | ❌ **拒绝** | 最坏组合：预发布能装，正式版一发布就把 bundle 摘掉 |
 | `<0.3.0` | ✅ | ✅ | 但会一并放进 `0.3.0-rc.1`，超出已验证范围 |
 | **`<0.3.0-0`** | ✅ | ✅ | 推荐：0.2.x 全放行，`0.3.0-rc.1` 也挡住 |
 
 上界写错时宿主**不会降级运行**：`loadProfileDirectory()` 对不兼容 bundle 直接抛错，该 bundle 落入 `skippedBundles`，启动时 stderr 输出 `skipping profile bundle "dsh-subagent-role-router"` —— 插件本体与设置卡片**一起消失**。
+
+**为什么下界要分三段而不是写成 `>=0.1.7-rc.1 <0.3.0-0` 一行？** 因为 npm 解析 peer 时**不带** `includePrerelease`，而 semver 的默认规则要求预发布版本必须由**同元组**（`0.2.1-rc.x` 属于 `0.2.1` 元组）的比较符显式接住。一行大区间会静默漏掉 `0.2.0-rc.1`、`0.2.1-rc.2` 这类预发布宿主 —— 装得上，但 `npm install` 报 `ERESOLVE`。分段后宿主校验（宽松）与 npm 解析（严格）**同时成立**：
+
+| 宿主版本 | 宿主 `includePrerelease:true` | npm 默认严格模式 |
+| --- | --- | --- |
+| `0.1.7-rc.2` | ✅ | ✅ |
+| `0.2.0-rc.1` | ✅ | ✅ |
+| `0.2.1-rc.2` | ✅ | ✅ |
+| `0.2.5` / `0.2.1` | ✅ | ✅ |
+| `0.3.0-rc.1` | ❌ 挡住 | ❌ 挡住 |
 
 ## 配置
 
@@ -240,21 +258,19 @@ semver.satisfies(runtimeVersion, range, { includePrerelease: true })
 ## 测试
 
 ```sh
+npm install
 npm test
 ```
 
-测试分三组：
+共 **24 项**，分三组：
 
 - `test/fork-window.test.mjs` —— 窗口切片的映射与安全回退，用真实 DSH `Session` 验证种子的连续性合法性。
-- `test/router-audit.test.mjs` —— 路由判定、显式覆盖保留、round-robin 每子代理一次、团队豁免、卸载还原、主会话不受影响。
+- `test/router-audit.test.mjs` —— 路由判定、显式覆盖保留、round-robin 每子代理一次、团队豁免、卸载还原、主会话不受影响，以及 **0.2.x 形状的 fork 后端（只有 `prepareContinuable`、没有 `start`）仍能被切片**。
 - `test/client-audit.test.mjs` —— 设置卡的表单校验、`forkWindowTurns` 边界与序列化、提示开关同步、订阅与定时器清理。
 
-> `fork-window.test.mjs` 依赖 DSH 宿主包 `@deepseek-ai/dsh-session`。DSH Desktop 把它打包在 `app.asar` 内，普通 Node 解析不到该路径；请用 DSH 自带的 Electron 运行测试：
+> `fork-window.test.mjs` 需要一个**真实的** `@deepseek-ai/dsh-session`。`tools/dsh-session-resolver.mjs` 会按顺序找：环境变量 `DSH_SESSION_PATH` → `node_modules` 里的依赖（`npm install` 后即命中）→ `~/.dsh/profiles/*/node_modules` → 各平台 DSH Desktop 安装目录。
 >
-> ```powershell
-> $env:ELECTRON_RUN_AS_NODE='1'
-> & 'C:\Users\<你>\AppData\Local\Programs\DeepSeek Harness\DeepSeek Harness.exe' --test
-> ```
+> **找不到时这组测试会 `skip` 而不是 `fail`** —— 够不到被测对象不等于代码有错，把它报成红色只会训练人忽略红色输出。想强制指定路径就设 `DSH_SESSION_PATH`。
 
 ## 许可证
 
