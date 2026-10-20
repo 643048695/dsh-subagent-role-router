@@ -4,6 +4,39 @@
 
 **本项目是 [dingminhua/dsh-subagent-default-model](https://github.com/dingminhua/dsh-subagent-default-model)（MIT，Copyright (c) 2026 LaoDing）的衍生作品。** 3.0.0 之前的条目由原作撰写，其中的功能、修复与测试记录均属原作工作；本项目的改动从 **3.0.0** 起记录。
 
+## 4.0.0 (2026-10-21)
+
+每个角色的路由从**一条**变成**一个候补队列**：同一个角色可以配多个模型，按忙闲顺延，全忙时溢出共享，失败进冷却。
+
+### Added
+
+- **角色候补池（`exploreModels` / `planModels` / `patchModels`）**：每个角色的路由不再只能配一条，而是一个有序的候补队列，**数组长度＝该角色可同时运行的子代理数**。派发时按「占用最少、并列取靠前」挑一条：第 1 个任务给候补 1，候补 1 在跑时第 2 个给候补 2，三个候补全忙时第 4 个任务**不排队**，而是溢给当前占用最少的那个 —— 「3 候补 + 4 并发」的分布是 **2/1/1**。工位在子代理结算（`receipt.result` settle）时归还；`startActivation` 抛错时立即归还。
+- **失败冷却（`roleSlotCooldownSeconds`，默认 15 秒）**：某条候补调用失败后暂停使用，后续派发直接跳过它；填 `0` 关闭。冷却只影响**新派发**，已在跑的子代理由故障转移就地处理。全部候补都在冷却时**仍然照常派发**（忽略冷却挑一个）并打 warn，而不是拒绝派发把子代理弄死。
+- **角色内 failover**：候补池 ≥2 条时，子代理运行中的失败切换**限定在该角色自己的候补队列内**，不会跳到别的角色的模型上。单候补角色仍回落到 `models` 基础池，行为与 3.1.0 一致。
+- **候选不可用识别（`isUnusableCandidate`）**：新增 `CANDIDATE_UNUSABLE_CODES`（`UNKNOWN_MODEL` / `NO_ADAPTER` / `UNSUPPORTED_REASONING_EFFORT` / `INVALID_CONFIG`）与 `MODEL_UNAVAILABLE_PATTERN`。网关用 400 明确告知「这个模型你的账号用不了」时（如 `model [x] is not allowed for user type [...]`、`no such model`、`knows no model`），该候补被识别为不可用 → 跳过并冷却，并打一条点名该路由的 warn。**边界刻意保留**：真正的请求格式错误（如消息结构不合法）仍是 `INVALID_REQUEST` 但**不**触发切换，直接抛出 —— 否则一个代码 bug 会把整个候补队列烧光。
+- **设置卡片支持多行候补**：三个角色卡下方可「＋ 增加候补」/「－ 移除」（只剩 1 行时禁用移除），每行复用原有的 provider / model / effort 三级联动与 effort 声明校验；新增冷却秒数数字输入（0-3600，默认 15，`0` 保留为有效值）。
+- **新测试文件 `test/schema-pool.test.mjs`**（5 项），以及 `router-audit` 新增 12 项、`client-audit` 新增 6 项。总数 24 → **48 项**。
+
+### Fixed
+
+- **「用不了的候补」会一直赢下工位、把队列堵死**。实测发现：一个被网关以 `model [gpt-6.1-sol] is not allowed for user type [personal_free_user]` 拒绝的候补，被适配器归类成通用的 `INVALID_REQUEST`（请求格式错误），而这一类既不在 `FAILOVER_TRIGGER_CODES` 也不在 `FAILOVER_ELIGIBLE_CODES` 里 —— 于是它既不顺延也不冷却。它跑不到一秒就失败，因此**永远显示为空闲**，每次派发都赢下工位然后失败一次。现在这类「指名模型」的 400 被单独识别为候选不可用（见上），跳过并冷却。
+- **候补条目不带 `reasoningEffort` 会被 schema 挡掉**：设置界面的序列化不会为未填写的推理强度产出该键，而原 `MODEL_ENTRY` 的对象分支把它声明为必填，导致保存被拒。候补池改用独立的 `POOL_ENTRY`，其对象分支 `reasoningEffort` 带 `.default("")`。
+
+### Changed
+
+- **`applyDefaultModel` 拆成 `routeDelegation` + 薄封装**：`routeDelegation(state, request, label, reserve)` 返回 `{ request, lease }`，`lease.release()` 负责归还工位；`applyDefaultModel` 保留为 `.request` 的兼容封装。
+- **`installFailover` 的闸门顺序重排**：先判 `signal?.aborted` / 是否子代理 / 是否可切换失败 → **再写冷却** → 最后取 failover 视图。这样单候补角色也能进冷却（原来取不到视图就直接 `next()`，冷却永远写不进去）。
+- **fork 分支不占工位**：`hookForkProvider` 的 `fork.start` 包装走 `routeDelegation(..., reserve=false)`，因为 fork 分支拿不到 receipt，占了工位就永远还不了。
+- **旧配置自动兼容**：只配了旧三元组（`patchProvider` / `patchModel` / `patchEffort`）时按「一行候补」处理；保存候补池时把**第一行同步写回**这三个旧字段，便于回退。
+- 设置指纹（`savedFormFingerprint`）纳入三个角色池与冷却秒数，避免 describe mirror 滞后时把旧候补列表复活。
+- 版本号 3.1.0 → **4.0.0**。新增能力 + 两处行为变更（failover 闸门顺序、fork 不占工位），按 semver 走 major。
+
+### Tests
+
+- **48 项全通过**（fork-window 8 + router-audit 21 + client-audit 14 + schema-pool 5）。
+- 新增的候补池测试覆盖：单候补等价性、忙则顺延、3 候补 4 并发的 `2/1/1`、结算后工位归还、失败冷却、冷却归零、全部冷却仍派发并 warn、显式模型不占工位、角色内 failover、候选不可用识别与误判边界。
+- **`test/fork-window.test.mjs` 继续走 `tools/dsh-session-resolver.mjs`**（找不到真实 `Session` 时 skip 而非 fail），本次未改其解析逻辑。
+
 ## 3.1.0 (2026-10-17)
 
 适配 **DSH 0.2.1-rc.2**。这一版的核心是：0.2.x 把 fork 后端的内部实现整体重写了，3.0.0 依赖的两个宿主接口都没了。**功能没有减少，但实现路径换了一条更稳的。**

@@ -331,3 +331,161 @@ test("8. edge cases of forkWindowTurns validation", () => {
   assert.equal(norm([5]), 3, "Array must fallback to 3");
   assert.equal(norm(true), 3, "Boolean must fallback to 3");
 });
+
+// ── role candidate pools: form shape invariants ─────────────────────────────
+
+// client.js runs in its OWN vm realm, so values it builds carry that realm's
+// Object.prototype and `deepStrictEqual` rejects them as "same structure but not
+// reference-equal". Compare the plain JSON projection instead.
+const plain = (value) => JSON.parse(JSON.stringify(value));
+
+test("9. normalizeRoleRoutes: pool array first, legacy single value second, always one row", () => {
+  const client = loadClient();
+  const norm = client.normalizeRoleRoutes;
+
+  // The stored pool wins over the legacy triple.
+  assert.deepEqual(
+    plain(norm({ patchProvider: "old", patchModel: "oldm", patchModels: [{ provider: "p", model: "m1" }, { provider: "q", model: "m2", reasoningEffort: "high" }] }, "patch")),
+    [{ provider: "p", model: "m1", reasoningEffort: "" }, { provider: "q", model: "m2", reasoningEffort: "high" }]
+  );
+
+  // An empty pool falls back to the legacy single route.
+  assert.deepEqual(
+    plain(norm({ patchProvider: "legacy", patchModel: "legacy-model", patchEffort: "low", patchModels: [] }, "patch")),
+    [{ provider: "legacy", model: "legacy-model", reasoningEffort: "low" }]
+  );
+
+  // A bare-string entry takes the role's own provider.
+  assert.deepEqual(
+    plain(norm({ exploreProvider: "p", exploreModels: ["bare"] }, "explore")),
+    [{ provider: "p", model: "bare", reasoningEffort: "" }]
+  );
+
+  // Nothing configured at all: exactly one blank row, so the card can render
+  // and the user has something to fill in.
+  assert.deepEqual(plain(norm({}, "plan")), [{ provider: "", model: "", reasoningEffort: "" }]);
+  assert.deepEqual(plain(norm(undefined, "plan")), [{ provider: "", model: "", reasoningEffort: "" }]);
+});
+
+test("10. serializeRolePool drops blank spare lanes but keeps half-filled ones out of the document", () => {
+  const client = loadClient();
+  const serialize = client.serializeRolePool;
+
+  assert.deepEqual(plain(serialize([
+    { provider: "p", model: "m1", reasoningEffort: "" },
+    { provider: "", model: "", reasoningEffort: "" },
+    { provider: "q", model: "m2", reasoningEffort: "high" }
+  ])), [
+    { provider: "p", model: "m1" },
+    { provider: "q", model: "m2", reasoningEffort: "high" }
+  ], "blank rows must be dropped and an empty effort must not be written");
+
+  assert.deepEqual(plain(serialize([])), []);
+  assert.deepEqual(plain(serialize(null)), []);
+});
+
+test("11. roleRouteIncomplete: blank lane is fine, half-filled lane is not", () => {
+  const client = loadClient();
+  const incomplete = client.roleRouteIncomplete;
+
+  assert.equal(incomplete([{ provider: "", model: "" }]), false, "a spare blank lane is not an error");
+  assert.equal(incomplete([{ provider: "p", model: "m" }]), false);
+  assert.equal(incomplete([{ provider: "p", model: "" }]), true, "provider without model cannot be saved");
+  assert.equal(incomplete([{ provider: "", model: "m" }]), true, "model without provider cannot be saved");
+  assert.equal(incomplete([]), false);
+  assert.equal(incomplete(null), false);
+});
+
+test("12. roleSlotCooldownSeconds: defaults to 15, 0 is a valid value, out of range falls back", () => {
+  const client = loadClient();
+  const norm = client.normalizeRoleCooldownSeconds;
+
+  assert.equal(norm(undefined), 15);
+  assert.equal(norm(null), 15);
+  assert.equal(norm(0), 0, "0 must survive: it means 'do not cool down'");
+  assert.equal(norm("0"), 0);
+  assert.equal(norm(15), 15);
+  assert.equal(norm("30"), 30);
+  assert.equal(norm(3600), 3600);
+  assert.equal(norm(3601), 15);
+  assert.equal(norm(-1), 15);
+  assert.equal(norm(1.5), 15);
+  assert.equal(norm("abc"), 15);
+});
+
+test("13. serializeDefaultModels writes both the pool and its first lane as the legacy triple", () => {
+  const client = loadClient();
+  const serialize = client.serializeDefaultModels;
+
+  const next = plain(serialize({}, [], "round-robin", true, true, {
+    roleMode: true,
+    rolePools: {
+      explore: [{ provider: "e", model: "em", reasoningEffort: "" }],
+      plan: [{ provider: "pl", model: "plm", reasoningEffort: "high" }, { provider: "pl2", model: "plm2", reasoningEffort: "" }],
+      patch: [{ provider: "pa", model: "pam", reasoningEffort: "" }, { provider: "", model: "", reasoningEffort: "" }]
+    },
+    roleSlotCooldownSeconds: 45
+  }, null, false));
+
+  assert.deepEqual(next.exploreModels, [{ provider: "e", model: "em" }]);
+  assert.deepEqual(next.planModels, [
+    { provider: "pl", model: "plm", reasoningEffort: "high" },
+    { provider: "pl2", model: "plm2" }
+  ]);
+  assert.deepEqual(next.patchModels, [{ provider: "pa", model: "pam" }], "the blank spare lane must not be stored");
+
+  // Legacy triple mirrors lane 1, so an older build reads the same primary route.
+  assert.equal(next.exploreProvider, "e");
+  assert.equal(next.exploreModel, "em");
+  assert.equal(next.planProvider, "pl");
+  assert.equal(next.planModel, "plm");
+  assert.equal(next.planEffort, "high");
+  assert.equal(next.patchModel, "pam");
+  assert.equal(next.roleSlotCooldownSeconds, 45);
+});
+
+test("14. savedFormFingerprint covers the role pools, and seedFromSavedForm round-trips them", () => {
+  const client = loadClient();
+  const fingerprint = client.savedFormFingerprint;
+  const seed = client.seedFromSavedForm;
+
+  const section = {
+    provider: "base", model: "base-a",
+    models: [{ provider: "base", model: "base-a" }],
+    roleMode: true,
+    exploreModels: [{ provider: "e", model: "em" }],
+    planModels: [{ provider: "p1", model: "m1" }, { provider: "p2", model: "m2" }],
+    patchModels: [{ provider: "g", model: "gm" }],
+    roleSlotCooldownSeconds: 30
+  };
+  const held = fingerprint(section);
+
+  // Two sections that differ ONLY in a role pool must not share a fingerprint:
+  // otherwise a lagging mirror would resurrect the old candidate list.
+  const changedPool = JSON.parse(JSON.stringify(section));
+  changedPool.patchModels = [{ provider: "g", model: "other" }];
+  assert.notEqual(fingerprint(changedPool), held);
+
+  const changedCooldown = JSON.parse(JSON.stringify(section));
+  changedCooldown.roleSlotCooldownSeconds = 31;
+  assert.notEqual(fingerprint(changedCooldown), held);
+
+  const rebuilt = seed(held, {});
+  assert.deepEqual(plain(rebuilt.exploreModels), [{ provider: "e", model: "em", reasoningEffort: "" }]);
+  assert.deepEqual(plain(rebuilt.planModels), [
+    { provider: "p1", model: "m1", reasoningEffort: "" },
+    { provider: "p2", model: "m2", reasoningEffort: "" }
+  ]);
+  assert.deepEqual(plain(rebuilt.patchModels), [{ provider: "g", model: "gm", reasoningEffort: "" }]);
+  assert.equal(rebuilt.roleSlotCooldownSeconds, 30);
+  assert.deepEqual(plain(client.normalizeDefaultModels(rebuilt)), [{ provider: "base", model: "base-a", reasoningEffort: "" }]);
+
+  // A fingerprint of the rebuilt section must match the original exactly.
+  assert.equal(fingerprint(rebuilt), held);
+
+  // Defensive: garbage and the old bare-array shape must not throw.
+  assert.deepEqual(plain(seed("{not json", { fallback: true })), { fallback: true });
+  assert.equal(seed(null, { fallback: true }).fallback, true);
+  assert.deepEqual(plain(client.normalizeDefaultModels(seed(JSON.stringify([{ provider: "x", model: "y" }]), {}))),
+    [{ provider: "x", model: "y", reasoningEffort: "" }]);
+});

@@ -2,7 +2,7 @@
 
 [English](README.en.md) | 中文
 
-为 [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness) 的子代理（subagent）派发选择路由：**按角色分流**、多模型轮换、跨供应商故障转移，并为 fork 类派发做**活跃窗口切片**。
+为 [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness) 的子代理（subagent）派发选择路由：**按角色分流**、**每个角色可配多个候补并按忙闲顺延**、多模型轮换、跨供应商故障转移，并为 fork 类派发做**活跃窗口切片**。
 
 当创建子代理时未显式指定 `model` 时，本插件按配置注入路由 —— 因此所有 `subagent`、`subagent_fork` 以及任何省略 `agentOptions` 的工具调用都会经过它。显式传参的覆盖始终生效；配置缺失或不完整时保持原有行为（子代理继承父会话路由）。
 
@@ -10,7 +10,7 @@
 >
 > 本项目基于 [**dingminhua/dsh-subagent-default-model**](https://github.com/dingminhua/dsh-subagent-default-model)（MIT，Copyright (c) 2026 **LaoDing**）二次开发。
 >
-> 原作提供了本项目的基础能力：默认模型注入、多模型分配策略、跨供应商故障转移、路由可见性。本项目在其之上新增了**按角色路由**、**fork 活跃窗口切片**、**agent-teams 豁免**三项能力。原作的版权与许可声明完整保留在 [LICENSE](LICENSE) 中。
+> 原作提供了本项目的基础能力：默认模型注入、多模型分配策略、跨供应商故障转移、路由可见性。本项目在其之上新增了**按角色路由**、**角色候补池（忙闲顺延 / 溢出并发 / 失败冷却）**、**fork 活跃窗口切片**、**agent-teams 豁免**四项能力。原作的版权与许可声明完整保留在 [LICENSE](LICENSE) 中。
 
 ## 本插件比原作多了什么
 
@@ -21,6 +21,7 @@
 | 跨供应商故障转移 | ✅ | ✅ |
 | 路由可见性（界面行 + 提示词注入） | ✅ | ✅ |
 | **按角色路由**（探索 / 规划 / 修补） | — | ✅ 新增 |
+| **角色候补池**（忙闲顺延 / 溢出并发 / 失败冷却） | — | ✅ 新增 |
 | **fork 活跃窗口切片** | — | ✅ 新增 |
 | **agent-teams 豁免** | — | ✅ 新增 |
 
@@ -45,7 +46,7 @@
 3. **关键词兜底** —— 提示词里出现 `explore`/`investigate`/`audit`/`explain`/`探索`/`排查`/`解释`/`不理解` 等判为 explore；`plan`/`design`/`架构`/`规划`/`方案`/`设计` 判为 plan；`patch`/`implement`/`fix`/`refactor`/`修补`/`实现` 判为 patch。
 4. **兜底默认** —— 都没命中时判为 **patch**（通用型）。这是刻意的：拿不准的活按「要动代码」对待，宁可给它一个更强的模型，也不要让一个真正要改代码的任务落到弱模型上。
 
-**配置**：开启 `roleMode`，然后为三个角色各填 `provider` / `model` / `effort`（共 9 个字段）。某个角色留空时**回落到 `models` 列表**（即功能二的多模型策略），因此可以只配你想区别对待的角色。
+**配置**：开启 `roleMode`，然后为三个角色各填 `provider` / `model` / `effort`（共 9 个字段），或改用功能六的候补队列（`exploreModels` / `planModels` / `patchModels`）让同一角色可以同时跑多个子代理。某个角色留空时**回落到 `models` 列表**（即功能二的多模型策略），因此可以只配你想区别对待的角色。
 
 **与功能二、三的关系**：角色路由在**派发时**决定「这个子代理去哪个模型」；功能二的策略决定「多个子代理之间怎么分配」；功能三在**运行中**决定「这条路由挂了换哪条」。三者独立，可以同时开。
 
@@ -130,6 +131,25 @@ answer with this route. This line is system-provided context about the runtime, 
 > 注意：窗口切片取的是**事件级最近 N 轮**，不等于读取上下文压缩（ACP）的实际活动窗口。两者目标一致（都为了变小），但不是同一个数据源。
 
 **agent-teams 豁免**：`agent-teams` 的团队成员派发**不做切片**。团队协作依赖完整的历史上下文（队长和队员之间要看到彼此的往来），切片会让队员丢失关键上下文。插件通过标签前缀 `agent-teams:` 与子会话描述符帧识别团队成员，识别到就完全放行。
+
+## 功能六：角色候补池 —— 同一个角色配多个模型，按忙闲顺延、溢出并发
+
+功能一解决的是「不同角色去不同模型」，但每个角色当时只能配**一条**路由。于是出现一个很实际的困扰：**同一个角色同时来两个任务时，第二个任务要么排队，要么和第一个抢同一个模型**。
+
+从 **4.0.0** 起，每个角色的路由不再是一条，而是一个**候补队列**（candidate pool）：
+
+- **行数＝工位数** —— 设置卡片里每个角色下方可以「＋ 增加候补」/「－ 移除」。配 3 行就是这个角色可以**同时跑 3 个**子代理；想只用 1 个就留 1 行。
+- **忙则顺延** —— 第 1 个任务派给候补 1；候补 1 还在跑时，第 2 个任务派给候补 2；候补 2 也在跑就派候补 3。
+- **满了就共享** —— 3 个候补全在忙时，第 4 个任务**不会排队等待**，而是派给当前**占用最少**的那个（并列时取靠前的）。所以「3 个候补、4 个并发任务」的分布是 **2/1/1**，而不是 1/1/2 或 1/1/1+排队。
+- **失败进冷却** —— 某条候补调用失败（限流、配额、超时、连接中断、密钥失效，以及「这个模型你的账号没有权限」这类**用不了**的失败）后，它会被**暂停使用**，后续派发直接跳过它。暂停时长由 `roleSlotCooldownSeconds` 控制，默认 **15 秒**，可填 `0` 关闭。
+- **全部冷却中仍然干活** —— 如果所有候补都在冷却，插件**不会拒绝派发**（那等于让子代理直接死掉），而是忽略冷却照常挑一个，并打一条 warn 让这种降级**可见**。
+- **冷却只影响新派发** —— 已经在跑的子代理不受影响，它的失败由功能三的故障转移就地切换处理，且切换范围**限定在这个角色自己的候补队列内**，不会跑到别的角色的模型上。
+- **显式指定的模型不占工位** —— 调用方自己指定了 `agentOptions.model` / `provider` 的派发（例如固定模型的审查任务）以及 agent-teams 成员，完全绕过候补池，也不占用任何工位。
+- **旧配置自动兼容** —— 只配了旧的三元组字段（`patchProvider` / `patchModel` / `patchEffort`）时，它被当作「只有一行的候补队列」，行为与旧版完全一致；保存新配置时，候补队列的第一行会同步写回这三个旧字段，方便回退。
+
+**为什么要「冷却」而不是「失败就永久剔除」**：限流和超时是**暂时的**，永久剔除会让额度恢复后的模型再也用不上；而 15 秒的默认值足够躲过一次突发限流，又短到不需要人工干预。真正永久性的问题（模型不存在、账号无权限）会**每次失败都打一条点名该路由的 warn**，提示你去删掉或修正那一行 —— 靠日志暴露，而不是靠静默降级。
+
+> 这条「用不了的候补会一直占着工位」是实测发现的：一个被网关以 `model [gpt-6.1-sol] is not allowed for user type [personal_free_user]` 拒绝的候补，最初被归类成通用的 `INVALID_REQUEST`（请求格式错误），因而既不顺延也不冷却。它从不长时间运行，于是一直显示为空闲，每次派发都赢下工位然后失败一次，把整个队列堵死。现在这类**指名模型的** 400 被单独识别为「候选不可用」，跳过并冷却；而真正的请求格式错误（例如消息结构不合法）仍然**不**触发切换，直接抛出 —— 免得一个代码 bug 把整个候补队列烧光。
 
 ### 其他配置能力
 
@@ -225,6 +245,19 @@ semver.satisfies(runtimeVersion, range, { includePrerelease: true })
     patchModel: deepseek-v4.1-flash
     patchEffort: high
 
+    # 功能六：角色候补池（可选）。写了 *Models 就以它为准，
+    # 上面的三元组字段被当作「只有一行」的退化形态。
+    # 数组长度＝该角色可以同时跑几个子代理。
+    patchModels:
+      - provider: workbuddy
+        model: deepseek-v4.1-flash
+        reasoningEffort: high
+      - provider: magpie
+        model: sensenova/kimi-k3
+      - provider: magpie
+        model: workbuddy/mimo-v2.6-pro
+    roleSlotCooldownSeconds: 15   # 失败后暂停使用该候补的秒数；0 = 关闭
+
     # 功能五：fork 活跃窗口切片
     forkWindowSlicing: true    # 默认开
     forkWindowTurns: 3         # 保留最近 N 轮（1-20）
@@ -245,6 +278,8 @@ semver.satisfies(runtimeVersion, range, { includePrerelease: true })
 | `exploreProvider` / `exploreModel` / `exploreEffort` | string | `""` | 探索角色路由；`exploreModel` 为空时回落 `models`。 |
 | `planProvider` / `planModel` / `planEffort` | string | `""` | 规划角色路由；同上。 |
 | `patchProvider` / `patchModel` / `patchEffort` | string | `""` | 修补角色路由；同上。 |
+| `exploreModels` / `planModels` / `patchModels` | array | `[]` | 功能六：该角色的候补队列。每项是 string 或 `{provider, model, reasoningEffort?}`；**数组长度＝该角色可同时运行的子代理数**。非空时优先于上面的三元组字段。 |
+| `roleSlotCooldownSeconds` | number | `15` | 功能六：候补失败后被新派发跳过的秒数；`0` 表示不暂停，失败只顺延到下一个候补。 |
 | `forkWindowSlicing` | boolean | `true` | 功能五：开启 fork 活跃窗口切片。 |
 | `forkWindowTurns` | number | `3` | 功能五保留的最近轮数（1-20）。 |
 | `showChatModelNotice` | boolean | `false` | 在对话视图显示模型变更提示行。 |
@@ -262,11 +297,12 @@ npm install
 npm test
 ```
 
-共 **24 项**，分三组：
+共 **48 项**，分四组：
 
 - `test/fork-window.test.mjs` —— 窗口切片的映射与安全回退，用真实 DSH `Session` 验证种子的连续性合法性。
-- `test/router-audit.test.mjs` —— 路由判定、显式覆盖保留、round-robin 每子代理一次、团队豁免、卸载还原、主会话不受影响，以及 **0.2.x 形状的 fork 后端（只有 `prepareContinuable`、没有 `start`）仍能被切片**。
-- `test/client-audit.test.mjs` —— 设置卡的表单校验、`forkWindowTurns` 边界与序列化、提示开关同步、订阅与定时器清理。
+- `test/router-audit.test.mjs` —— 路由判定、显式覆盖保留、round-robin 每子代理一次、团队豁免、卸载还原、主会话不受影响，**0.2.x 形状的 fork 后端（只有 `prepareContinuable`、没有 `start`）仍能被切片**，以及功能六的候补池行为：单候补等价性、忙闲顺延、3 候补 4 并发的 `2/1/1`、工位归还、失败冷却、冷却归零、全部冷却仍派发、显式模型不占工位、角色内 failover、以及「用不了的候补」的识别与误判边界。
+- `test/client-audit.test.mjs` —— 设置卡的表单校验、`forkWindowTurns` 边界与序列化、提示开关同步、订阅与定时器清理，以及候补池的表单不变量（池优先于三元组、空行丢弃、半填行拦截、冷却 `0` 保留、旧字段同步写入、指纹与回填往返）。
+- `test/schema-pool.test.mjs` —— 设置 schema 层：池字段默认值、**不带 `reasoningEffort` 的候补条目仍被接受**、冷却 `0` 存活、旧单值字段仍可解析、池优先于旧三元组。
 
 > `fork-window.test.mjs` 需要一个**真实的** `@deepseek-ai/dsh-session`。`tools/dsh-session-resolver.mjs` 会按顺序找：环境变量 `DSH_SESSION_PATH` → `node_modules` 里的依赖（`npm install` 后即命中）→ `~/.dsh/profiles/*/node_modules` → 各平台 DSH Desktop 安装目录。
 >

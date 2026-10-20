@@ -2,7 +2,7 @@
 
 English | [中文](README.md)
 
-Pick the route for [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness) subagent delegations: **per-role routing**, multi-model rotation, cross-provider failover, and **active-window slicing** for fork-style delegations.
+Pick the route for [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness) subagent delegations: **per-role routing**, **several candidate models per role with spillover and overflow**, multi-model rotation, cross-provider failover, and **active-window slicing** for fork-style delegations.
 
 When a subagent is created without an explicit `model`, this plugin injects a configured route — so every `subagent`, `subagent_fork`, and any tool that omits `agentOptions` routes through it. Explicit per-call overrides always win; an absent or incomplete settings section keeps the historical behavior (children inherit the parent route).
 
@@ -10,7 +10,7 @@ When a subagent is created without an explicit `model`, this plugin injects a co
 >
 > This project is a derivative work of [**dingminhua/dsh-subagent-default-model**](https://github.com/dingminhua/dsh-subagent-default-model) (MIT, Copyright (c) 2026 **LaoDing**).
 >
-> The original provides the base capabilities: default-model injection, multi-model distribution strategies, cross-provider failover, and route visibility. This project adds **per-role routing**, **fork active-window slicing**, and **agent-teams exemption** on top. The original copyright and license notice is preserved in full in [LICENSE](LICENSE).
+> The original provides the base capabilities: default-model injection, multi-model distribution strategies, cross-provider failover, and route visibility. This project adds **per-role routing**, **role candidate pools** (spillover, overflow, failure cooldowns), **fork active-window slicing**, and **agent-teams exemption** on top. The original copyright and license notice is preserved in full in [LICENSE](LICENSE).
 
 ## What this plugin adds over the original
 
@@ -21,6 +21,7 @@ When a subagent is created without an explicit `model`, this plugin injects a co
 | Cross-provider failover | ✅ | ✅ |
 | Route visibility (UI row + prompt injection) | ✅ | ✅ |
 | **Per-role routing** (explore / plan / patch) | — | ✅ new |
+| **Role candidate pools** (spillover / overflow / cooldown) | — | ✅ new |
 | **Fork active-window slicing** | — | ✅ new |
 | **agent-teams exemption** | — | ✅ new |
 
@@ -45,7 +46,7 @@ Role detection has four tiers, from explicit to fuzzy:
 3. **Keyword fallback** — `explore`/`investigate`/`audit`/`explain`/`analyze`/`review` (and `探索`/`排查`/`解释`/`不理解`) map to explore; `plan`/`architect`/`design` (and `规划`/`架构`/`方案`/`设计`) map to plan; `patch`/`implement`/`fix`/`refactor`/`write_code` (and `修补`/`编写`/`实现`) map to patch.
 4. **Default** — anything unclassified is treated as **patch** (general purpose). This is deliberate: when in doubt, treat the work as "code will change", so a task that really does edit code never lands on a weak model.
 
-**Configuration**: enable `roleMode`, then fill `provider` / `model` / `effort` for each of the three roles (9 fields). A role left empty **falls back to the `models` list** (capability 2's strategy), so you can differentiate only the roles you care about.
+**Configuration**: enable `roleMode`, then fill `provider` / `model` / `effort` for each of the three roles (9 fields), or switch to capability 6's candidate pools (`exploreModels` / `planModels` / `patchModels`) so the same role can run several subagents at once. A role left empty **falls back to the `models` list** (capability 2's strategy), so you can differentiate only the roles you care about.
 
 **Relation to capabilities 2 and 3**: role routing decides *which model this delegation goes to* at dispatch time; the strategy decides *how parallel delegations are distributed*; failover decides *which route to switch to when one breaks* at runtime. All three are independent and can be enabled together.
 
@@ -130,6 +131,25 @@ Better slow than wrong. Slicing **never modifies the parent session**; it constr
 > Note: window slicing takes the most recent N turns **at event level**, which is not the same as reading the context-compaction (ACP) active window. Both aim at the same thing (being smaller), but they are not the same data source.
 
 **agent-teams exemption**: delegations for `agent-teams` team members are **not sliced**. Team collaboration depends on full history (captain and members need to see each other's exchanges), and slicing would drop key context. The plugin recognizes team members by the `agent-teams:` label prefix and by the child session's descriptor frame, and lets them through untouched.
+
+## Capability 6: Role candidate pools — several models per role, with spillover and overflow
+
+Capability 1 answers "which model does each role get", but at that point each role could hold only **one** route. That leaves a very practical problem: **when two tasks of the same role arrive at once, the second one either queues or fights the first for the same model.**
+
+From **4.0.0**, each role's route is no longer a single value but a **candidate pool**:
+
+- **Rows = lanes** — the settings card offers "＋ Add candidate" / "－ Remove" under each role. Three rows means that role can run **three subagents at the same time**; keep one row if you only want one.
+- **Spillover when busy** — task 1 goes to candidate 1; while candidate 1 is still running, task 2 goes to candidate 2; if candidate 2 is busy too, task 3 goes to candidate 3.
+- **Overflow when full** — with all three candidates busy, the fourth task does **not** wait in a queue. It goes to whichever candidate currently carries the **fewest** tasks (ties broken by order). So "3 candidates, 4 concurrent tasks" distributes as **2/1/1**, not 1/1/2 and not 1/1/1 plus a queue.
+- **Failure cooldown** — when a candidate call fails (rate limit, quota, timeout, transport error, rejected credentials, and "this model is not available to your account" style **unusable** failures), that candidate is **paused** and later delegations skip it. The pause is `roleSlotCooldownSeconds`, default **15 seconds**; set `0` to disable it.
+- **A fully cooled pool still works** — if every candidate is cooling down, the plugin does **not** refuse the delegation (that would simply kill the subagent). It ignores the cooldowns, picks one anyway, and logs a warning so the degradation is **visible**.
+- **Cooldowns only affect new delegations** — a subagent already running is unaffected; its failures are handled in place by the capability 3 failover, and that failover is **confined to this role's own pool**, so it never jumps to another role's model.
+- **Explicit models take no lane** — a delegation that specifies its own `agentOptions.model` / `provider` (for example a fixed-model review task), and any agent-teams member, bypasses the pool entirely and occupies no lane.
+- **Old configuration keeps working** — if only the legacy triple (`patchProvider` / `patchModel` / `patchEffort`) is set, it is treated as a one-row pool and behaves exactly as before. When a pool is saved, its first row is mirrored back into those three legacy fields so you can roll back.
+
+**Why a cooldown instead of permanent removal**: rate limits and timeouts are **temporary**; removing a model forever would lock out a model whose quota has since recovered. 15 seconds is long enough to ride out a burst of rate limiting and short enough to need no manual intervention. Genuinely permanent problems (model does not exist, account lacks access) log a **warning naming that route on every failure**, telling you to delete or fix that row — exposed through logs rather than silently degraded.
+
+> That "unusable candidate keeps winning the lane" behavior was found by testing: a candidate rejected by the gateway with `model [gpt-6.1-sol] is not allowed for user type [personal_free_user]` was originally classified as a generic `INVALID_REQUEST` (malformed request), so it neither failed over nor cooled down. It never ran long enough to look busy, so it won the lane on every delegation and failed once, blocking the queue. Such **model-naming** 400s are now recognized separately as "candidate unusable", skipped, and cooled down — while a genuinely malformed request (e.g. an invalid message shape) still does **not** trigger a switch and surfaces directly, so a code bug cannot burn through the whole pool.
 
 ### Other configuration
 
@@ -225,6 +245,19 @@ You can also edit the profile's patch file `~/.dsh/profiles/<profile>/cordis.pat
     patchModel: deepseek-v4.1-flash
     patchEffort: high
 
+    # Capability 6: role candidate pools (optional). When *Models is present it
+    # wins; the triple above is then treated as a one-row pool.
+    # Array length = how many subagents this role may run at once.
+    patchModels:
+      - provider: workbuddy
+        model: deepseek-v4.1-flash
+        reasoningEffort: high
+      - provider: magpie
+        model: sensenova/kimi-k3
+      - provider: magpie
+        model: workbuddy/mimo-v2.6-pro
+    roleSlotCooldownSeconds: 15   # seconds a failed candidate is skipped; 0 disables
+
     # Capability 5: fork active-window slicing
     forkWindowSlicing: true    # default on
     forkWindowTurns: 3         # keep the most recent N turns (1-20)
@@ -245,6 +278,8 @@ You can also edit the profile's patch file `~/.dsh/profiles/<profile>/cordis.pat
 | `exploreProvider` / `exploreModel` / `exploreEffort` | string | `""` | Explore role route; falls back to `models` when `exploreModel` is empty. |
 | `planProvider` / `planModel` / `planEffort` | string | `""` | Plan role route; same fallback. |
 | `patchProvider` / `patchModel` / `patchEffort` | string | `""` | Patch role route; same fallback. |
+| `exploreModels` / `planModels` / `patchModels` | array | `[]` | Capability 6: this role's candidate pool. Each entry is a string or `{provider, model, reasoningEffort?}`; **the array length is how many subagents the role may run concurrently**. When non-empty it takes precedence over the triple above. |
+| `roleSlotCooldownSeconds` | number | `15` | Capability 6: seconds a failed candidate is skipped by new delegations; `0` disables the pause so failures only fall through to the next candidate. |
 | `forkWindowSlicing` | boolean | `true` | Capability 5: enable fork active-window slicing. |
 | `forkWindowTurns` | number | `3` | Capability 5: number of recent turns to retain (1-20). |
 | `showChatModelNotice` | boolean | `false` | Show the model-change notice row in the conversation view. |
@@ -262,11 +297,12 @@ npm install
 npm test
 ```
 
-**24 cases**, in three groups:
+**48 cases**, in four groups:
 
 - `test/fork-window.test.mjs` — window slicing mapping and safe fallback, validating seed contiguity against the real DSH `Session`.
-- `test/router-audit.test.mjs` — role detection, explicit override preservation, round-robin once per child, team exemption, unload restoration, main session unaffected, and **a 0.2.x-shaped fork backend (only `prepareContinuable`, no `start`) still gets sliced**.
-- `test/client-audit.test.mjs` — settings-card form validation, `forkWindowTurns` bounds and serialization, notice toggle sync, subscription and timer cleanup.
+- `test/router-audit.test.mjs` — role detection, explicit override preservation, round-robin once per child, team exemption, unload restoration, main session unaffected, **a 0.2.x-shaped fork backend (only `prepareContinuable`, no `start`) still gets sliced**, and the capability 6 pool behavior: single-candidate equivalence, spillover when busy, `2/1/1` for 3 candidates with 4 concurrent tasks, lane hand-back, failure cooldown, zero cooldown, a fully cooled pool still serving, explicit models taking no lane, in-pool failover, and "unusable candidate" detection with its false-positive boundary.
+- `test/client-audit.test.mjs` — settings-card form validation, `forkWindowTurns` bounds and serialization, notice toggle sync, subscription and timer cleanup, plus the pool's form invariants (pool beats the triple, blank rows dropped, half-filled rows blocked, cooldown `0` preserved, legacy fields mirrored, fingerprint round-trip).
+- `test/schema-pool.test.mjs` — the settings schema layer: pool field defaults, **a candidate entry without `reasoningEffort` is still accepted**, cooldown `0` survives, the legacy single-value fields still parse, and the pool beats the legacy triple.
 
 > `fork-window.test.mjs` needs a **real** `@deepseek-ai/dsh-session`. `tools/dsh-session-resolver.mjs` looks in order: the `DSH_SESSION_PATH` environment variable → the `node_modules` dependency (hit right after `npm install`) → `~/.dsh/profiles/*/node_modules` → the platform DSH Desktop install directory.
 >

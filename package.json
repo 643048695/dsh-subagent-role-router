@@ -1,7 +1,7 @@
 {
   "name": "dsh-subagent-role-router",
-  "version": "3.1.0",
-  "description": "Route DSH subagent delegations to configured models: 3-role routing (explore / plan / patch), round-robin or random distribution, cross-provider failover, fork window slicing, and agent-teams exemption.",
+  "version": "4.0.0",
+  "description": "Route DSH subagent delegations to configured models: 3-role routing (explore / plan / patch) with per-role candidate pools (spillover, overflow, failure cooldowns), round-robin or random distribution, cross-provider failover, fork window slicing, and agent-teams exemption.",
   "keywords": [
     "deepseek-harness",
     "dsh",
@@ -10,6 +10,9 @@
     "agent",
     "model-routing",
     "role-routing",
+    "candidate-pool",
+    "spillover",
+    "load-balancing",
     "round-robin",
     "failover",
     "provider-failover",
