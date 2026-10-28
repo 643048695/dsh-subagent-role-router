@@ -24,6 +24,9 @@ When a subagent is created without an explicit `model`, this plugin injects a co
 | **Role candidate pools** (spillover / overflow / cooldown) | — | ✅ new |
 | **Fork active-window slicing** | — | ✅ new |
 | **agent-teams exemption** | — | ✅ new |
+| **Mid-run model switching** (with a `/subagent-role-router/route` backend) | — | ✅ 4.1.0 |
+| **Exemption rules** (preset / cwd / name prefix, optional pinned birth model) | — | ✅ 4.1.0 |
+| **Native whitelist mirror + half-specified model repair** | — | ✅ 4.1.0 |
 
 ---
 
@@ -158,6 +161,35 @@ From **4.0.0**, each role's route is no longer a single value but a **candidate 
 - **Hot reload** — settings changes apply to the next delegation.
 - **Clean unload** — the original service methods are restored on Cordis dispose, without overwriting later wrappers.
 
+## Capability 7: switch a running subagent's model — no need to wait it out
+
+From **4.1.0** a subagent that is **already running** can be re-pointed at another model (and reasoning effort) from the chat UI, without interrupting it or dispatching it again:
+
+- The subagent's card and notice strip carry a "switch model" control. A switch applies to its **next request**; everything it has already produced stays.
+- The mechanism is the `agent/request` waterfall: each child request gets its `provider` / `model` / `reasoningEffort` rewritten. The inherited `reasoningEffort` is dropped first — it belongs to the route being replaced, and a provider whose thinking level must agree with the effort rejects the mismatch outright.
+- An override is scoped to **one child** and removed on `agent/disposed`. The main session's requests never pass through this code.
+- agent-teams members can be switched by hand too; the automatic failover still exempts teams (see capability 3) — automatic and manual are different things.
+- The host serves `/subagent-role-router/route`: `GET route?childId=…` reads, `POST select` / `POST clear` writes. POST requires `content-type: application/json` on purpose — a cross-site form cannot send that without a CORS preflight, so it doubles as CSRF hardening.
+- To check whether an edit on disk actually got reloaded by cordis, probe `GET /subagent-role-router/route?childId=nothing` and read the `build` field (`ROUTER_BUILD`, bumped on every behavioural change).
+
+## Capability 8: exemption rules — some subagents should not be routed
+
+A rule set matched on **preset / cwd prefix / name prefix**. A matching delegation is either:
+
+- **fully exempt** — no route injected, the child inherits the parent session; or
+- **pinned to a birth model** (`exemptBirth`) — a model chosen by the rule, but only for the moment of birth: it takes no lane in the pool and never joins rotation.
+
+The editor does not ask you to type a prefix. The plugin sees every child's birth identity as it crosses the wrapper and records these in `~/.dsh/subagent-role-router-candidates.json` (at most 200 entries, evicted by last-seen), and the dropdown offers them. Preset ids embed a version (`egm-goldfish-0.2.0`); the version segment is stripped before storing, so the prefix keeps matching after a plugin upgrade.
+
+## Capability 9: mirror the routes into the host's native whitelist
+
+The host's `subagent` tool keeps a **whitelist of its own**: a model absent from it is refused even when you pass it explicitly. So a route configured only in the settings page is effectively **unreachable** for explicit dispatches.
+
+From **4.1.0** the plugin mirrors the page's models into that whitelist (`hostWhitelistModels` / `syncHostWhitelist`, idempotent, with `sameWhitelist` guarding needless writes), and repairs half-specified model names before `tools/execute` runs: when a tool call carries a bare `model` (`claude-x`) but the host wants `provider/model`, the provider is filled in from the single matching whitelist entry (`planDelegatedModelRoute` / `repairDelegatedModelName`). No match, or more than one, means **hands off** — guessing wrong is worse than not guessing.
+
+`GET /subagent-role-router/whitelist` explains the last sync; a failed sync logs a warning and never takes the plugin down.
+
+
 ## Install
 
 Install from GitHub with the DSH plugin command:
@@ -180,7 +212,7 @@ All 9 `@deepseek-ai/*` peers are declared as:
 >=0.1.7-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.2.1-0 || >=0.2.1-rc.1 <0.3.0-0
 ```
 
-That is the **0.1.7 line + the 0.2.0 line + the 0.2.1 line**, with nothing declared for `0.3.0` and up. **The host version verified today is DSH `0.2.1-rc.2`.**
+That is the **0.1.7 line + the 0.2.0 line + the 0.2.1 line**, with nothing declared for `0.3.0` and up. **The host version verified today is DSH `0.2.1-rc.3`** (the core bundled with the current desktop build, re-checked 2026-10-29).
 
 To understand why the range looks like this, you need to know **how DSH validates** it. `@deepseek-ai/dsh-app-boot` runs, for every `@deepseek-ai/dsh` / `dsh-*` peer:
 
@@ -205,6 +237,7 @@ A wrong upper bound does **not** degrade gracefully: `loadProfileDirectory()` th
 | `0.1.7-rc.2` | ✅ | ✅ |
 | `0.2.0-rc.1` | ✅ | ✅ |
 | `0.2.1-rc.2` | ✅ | ✅ |
+| `0.2.1-rc.3` | ✅ | ✅ |
 | `0.2.5` / `0.2.1` | ✅ | ✅ |
 | `0.3.0-rc.1` | ❌ blocked | ❌ blocked |
 
@@ -288,7 +321,9 @@ You can also edit the profile's patch file `~/.dsh/profiles/<profile>/cordis.pat
 
 ## Platform support
 
-**Windows, macOS and Linux are all supported**, with no platform-specific configuration. This plugin's runtime code is **pure JavaScript**: `lib/index.js` (host half) and `lib/client.js` (client half) do not read the filesystem, join paths, spawn processes, or test `process.platform` — they only consume the services and events the DSH host exposes, so platform differences are entirely the host's responsibility.
+**Windows, macOS and Linux are all supported**, with no platform-specific configuration: no process is spawned and `process.platform` is never consulted.
+
+The one place that touches the filesystem is the capability 8 cache of observed birth identities — a single JSON file at `~/.dsh/subagent-role-router-candidates.json`, built from `USERPROFILE || HOME`. A failed write is **ignored silently** (it only feeds the dropdown's candidates, never routing itself). Tests point it elsewhere with `setBirthSeenPath()`, so they never touch your `~/.dsh`.
 
 ## Tests
 
@@ -297,12 +332,17 @@ npm install
 npm test
 ```
 
-**48 cases**, in four groups:
+**95 cases**, in nine groups:
 
 - `test/fork-window.test.mjs` — window slicing mapping and safe fallback, validating seed contiguity against the real DSH `Session`.
 - `test/router-audit.test.mjs` — role detection, explicit override preservation, round-robin once per child, team exemption, unload restoration, main session unaffected, **a 0.2.x-shaped fork backend (only `prepareContinuable`, no `start`) still gets sliced**, and the capability 6 pool behavior: single-candidate equivalence, spillover when busy, `2/1/1` for 3 candidates with 4 concurrent tasks, lane hand-back, failure cooldown, zero cooldown, a fully cooled pool still serving, explicit models taking no lane, in-pool failover, and "unusable candidate" detection with its false-positive boundary.
 - `test/client-audit.test.mjs` — settings-card form validation, `forkWindowTurns` bounds and serialization, notice toggle sync, subscription and timer cleanup, plus the pool's form invariants (pool beats the triple, blank rows dropped, half-filled rows blocked, cooldown `0` preserved, legacy fields mirrored, fingerprint round-trip).
 - `test/schema-pool.test.mjs` — the settings schema layer: pool field defaults, **a candidate entry without `reasoningEffort` is still accepted**, cooldown `0` survives, the legacy single-value fields still parse, and the pool beats the legacy triple.
+- `test/live-route.test.mjs` — capability 7: a mid-run switch applies to the next request only, overrides are isolated per child, inherited effort is dropped, `agent/disposed` cleans up, the main session is untouched.
+- `test/exempt-rules.test.mjs` — capability 8: the three match dimensions, a full exemption injecting nothing, a pinned birth model, the candidate cache and its eviction, version-suffix stripping.
+- `test/team-model.test.mjs` — agent-teams member model semantics and the automatic-failover exemption boundary.
+- `test/whitelist-sync.test.mjs` — capability 9: whitelist derivation, idempotent comparison, unique-match repair of half-specified model names, hands-off when the match is not unique, warn-only on failure.
+- `test/real-directory.test.mjs` — model-directory reading against an extraction of a real install; `skip`s when it cannot reach one.
 
 > `fork-window.test.mjs` needs a **real** `@deepseek-ai/dsh-session`. `tools/dsh-session-resolver.mjs` looks in order: the `DSH_SESSION_PATH` environment variable → the `node_modules` dependency (hit right after `npm install`) → `~/.dsh/profiles/*/node_modules` → the platform DSH Desktop install directory.
 >

@@ -24,6 +24,9 @@
 | **角色候补池**（忙闲顺延 / 溢出并发 / 失败冷却） | — | ✅ 新增 |
 | **fork 活跃窗口切片** | — | ✅ 新增 |
 | **agent-teams 豁免** | — | ✅ 新增 |
+| **运行中实时换模型**（含 `/subagent-role-router/route` 后端） | — | ✅ 4.1.0 新增 |
+| **豁免规则**（按 preset / cwd / 名称前缀，可钉住出生模型） | — | ✅ 4.1.0 新增 |
+| **原生白名单镜像 + 半截模型名修复** | — | ✅ 4.1.0 新增 |
 
 ---
 
@@ -158,6 +161,35 @@ answer with this route. This line is system-provided context about the runtime, 
 - **热重载** —— 设置变更立即作用于下一次派发。
 - **干净卸载** —— Cordis 销毁时还原原始服务方法，且不覆盖后来者的包装。
 
+## 功能七：运行中直接换模型 —— 不必等它跑完
+
+从 **4.1.0** 起，一个**正在运行**的子代理可以在聊天界面里当场换模型与推理强度，不用中断、不用重派：
+
+- 子代理的卡片与通知条上有「换模型」入口；切换后**下一步请求**就发到新模型，已经产出的内容保持不动。
+- 机制是拦 `agent/request` waterfall：子代理每次发请求前改写 `provider` / `model` / `reasoningEffort`。继承来的 `reasoningEffort` 会被先丢掉 —— 它属于被替换掉的那条路由，而「思考强度必须与供应商一致」的 provider 会因为不匹配直接拒请求。
+- 覆盖只作用于**这一条子代理**，`agent/disposed` 时清理；主会话的请求永不经过这段代码。
+- agent-teams 成员也能手动换（自动 failover 仍然豁免团队，见功能三 —— 自动与手动是两件事）。
+- 后端提供 `/subagent-role-router/route` 端点：`GET route?childId=…` 查当前路由，`POST select` / `POST clear` 改；POST 强制要求 `content-type: application/json`，跨站表单发不出这个头，等于顺带做了 CSRF 防护。
+- 想确认「磁盘上的改动到底有没有被 cordis 重载进去」，探一下 `GET /subagent-role-router/route?childId=nothing` 返回的 `build` 字段（模块里 `ROUTER_BUILD` 常量，每次行为变更都会跳）。
+
+## 功能八：豁免规则 —— 有些子代理不该被路由
+
+按 **preset / cwd 前缀 / 名称前缀** 匹配一组规则，命中的派发：
+
+- **完全豁免**：不注入任何路由，子代理继承父会话；
+- 或**钉住出生模型**（`exemptBirth`）：仍然按规则指定一个模型，但**只决定出生那一次**，之后不再参与轮换、不再顺延工位。
+
+编辑器里的候选不是让你手敲的：插件在每次派发时都看得见子代理的出生身份，会把这些身份记进 `~/.dsh/subagent-role-router-candidates.json`（最多 200 条，按最后出现时间淘汰），下拉直接从这里取。preset id 里带版本号（`egm-goldfish-0.2.0`），存进去时会去掉版本段 —— 插件升级后前缀仍然匹配得上。
+
+## 功能九：把路由写进宿主原生白名单
+
+宿主的 `subagent` 工具有一份**自己的**模型白名单：不在名单上的模型，即使你显式写进参数也会被拒。所以如果只在设置页里配了路由，那条路由对显式派发其实是**不可达**的。
+
+**4.1.0** 起本插件把设置页里的模型镜像进这份白名单（`hostWhitelistModels` / `syncHostWhitelist`，幂等，`sameWhitelist` 判等避免无谓写盘），并在 `tools/execute` 之前修掉半截模型名：工具调用里写的是裸 `model`（`claude-x`），而宿主需要 `provider/model` 时，按白名单里唯一匹配的条目补上 provider（`planDelegatedModelRoute` / `repairDelegatedModelName`）。匹配不到或不唯一就**不动**，交给宿主照原样处理 —— 猜错比不猜更糟。
+
+`GET /subagent-role-router/whitelist` 会解释上一次同步的结果，同步失败只打 warn，不会让插件挂掉。
+
+
 ## 安装
 
 通过 DSH 插件命令从 GitHub 安装：
@@ -180,7 +212,7 @@ dsh plugin --profile desktop add /path/to/dsh-subagent-role-router
 >=0.1.7-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.2.1-0 || >=0.2.1-rc.1 <0.3.0-0
 ```
 
-即 **0.1.7 线 + 0.2.0 线 + 0.2.1 线**，`0.3.0` 起不再声明支持。**当前已验证的宿主版本是 DSH `0.2.1-rc.2`。**
+即 **0.1.7 线 + 0.2.0 线 + 0.2.1 线**，`0.3.0` 起不再声明支持。**当前已验证的宿主版本是 DSH `0.2.1-rc.3`**（当前桌面版内置核心，2026-10-29 复核）。
 
 要理解这个区间为什么长这样，得先知道 DSH **怎么校验**它。`@deepseek-ai/dsh-app-boot` 对每个 `@deepseek-ai/dsh` / `dsh-*` peer 执行：
 
@@ -205,6 +237,7 @@ semver.satisfies(runtimeVersion, range, { includePrerelease: true })
 | `0.1.7-rc.2` | ✅ | ✅ |
 | `0.2.0-rc.1` | ✅ | ✅ |
 | `0.2.1-rc.2` | ✅ | ✅ |
+| `0.2.1-rc.3` | ✅ | ✅ |
 | `0.2.5` / `0.2.1` | ✅ | ✅ |
 | `0.3.0-rc.1` | ❌ 挡住 | ❌ 挡住 |
 
@@ -288,7 +321,9 @@ semver.satisfies(runtimeVersion, range, { includePrerelease: true })
 
 ## 平台支持
 
-**Windows / macOS / Linux 均受支持**，且不需要任何平台专用配置。本插件的运行时代码是**纯 JavaScript**：`lib/index.js`（宿主半边）与 `lib/client.js`（客户端半边）不读取文件系统、不拼接路径、不派生进程、也不判断 `process.platform` —— 它只消费 DSH 宿主暴露的服务与事件，因此平台差异完全由 DSH 宿主承担。
+**Windows / macOS / Linux 均受支持**，不需要任何平台专用配置：不派生进程，也不判断 `process.platform`。
+
+唯一碰文件系统的地方是功能八的「见过的出生身份」缓存：一个 JSON 文件，路径由 `USERPROFILE || HOME` 拼出 `~/.dsh/subagent-role-router-candidates.json`，写失败**静默忽略**（它只影响下拉候选，不影响路由本身）。测试用 `setBirthSeenPath()` 指到临时目录，所以不会污染你的 `~/.dsh`。
 
 ## 测试
 
@@ -297,12 +332,17 @@ npm install
 npm test
 ```
 
-共 **48 项**，分四组：
+共 **95 项**，分九组：
 
 - `test/fork-window.test.mjs` —— 窗口切片的映射与安全回退，用真实 DSH `Session` 验证种子的连续性合法性。
 - `test/router-audit.test.mjs` —— 路由判定、显式覆盖保留、round-robin 每子代理一次、团队豁免、卸载还原、主会话不受影响，**0.2.x 形状的 fork 后端（只有 `prepareContinuable`、没有 `start`）仍能被切片**，以及功能六的候补池行为：单候补等价性、忙闲顺延、3 候补 4 并发的 `2/1/1`、工位归还、失败冷却、冷却归零、全部冷却仍派发、显式模型不占工位、角色内 failover、以及「用不了的候补」的识别与误判边界。
 - `test/client-audit.test.mjs` —— 设置卡的表单校验、`forkWindowTurns` 边界与序列化、提示开关同步、订阅与定时器清理，以及候补池的表单不变量（池优先于三元组、空行丢弃、半填行拦截、冷却 `0` 保留、旧字段同步写入、指纹与回填往返）。
 - `test/schema-pool.test.mjs` —— 设置 schema 层：池字段默认值、**不带 `reasoningEffort` 的候补条目仍被接受**、冷却 `0` 存活、旧单值字段仍可解析、池优先于旧三元组。
+- `test/live-route.test.mjs` —— 功能七：运行中换模型只改下一步、覆盖按子代理隔离、继承的 effort 被丢弃、`agent/disposed` 清理、主会话不受影响。
+- `test/exempt-rules.test.mjs` —— 功能八：三种匹配维度、完全豁免不注入、钉住出生模型、出生身份缓存与淘汰、版本后缀剥离。
+- `test/team-model.test.mjs` —— agent-teams 成员的模型语义与自动 failover 豁免边界。
+- `test/whitelist-sync.test.mjs` —— 功能九：白名单推导、幂等判等、半截模型名的唯一匹配修复、匹配不唯一时不动、同步失败只 warn。
+- `test/real-directory.test.mjs` —— 用真实安装目录的提取物核对模型目录读取；够不到时 `skip`。
 
 > `fork-window.test.mjs` 需要一个**真实的** `@deepseek-ai/dsh-session`。`tools/dsh-session-resolver.mjs` 会按顺序找：环境变量 `DSH_SESSION_PATH` → `node_modules` 里的依赖（`npm install` 后即命中）→ `~/.dsh/profiles/*/node_modules` → 各平台 DSH Desktop 安装目录。
 >

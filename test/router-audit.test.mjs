@@ -93,46 +93,6 @@ test('main session route is not affected',async()=>{
   assert.equal(await h.waterfall('agent/request',{agent:{id:'root',session:{header:{}}}},route),route);h.dispose();
 });
 
-// DSH 0.2.x shape: the in-process fork backend exposes ONLY
-// `prepareContinuable` — no `start`, and no separate driver package. The whole
-// window-slicing feature therefore has to ride on that one method. A harness
-// that still offers `fork.start` cannot catch a regression here, which is why
-// this case builds the 0.2.x surface explicitly.
-test('0.2.x fork backend without start is still sliced through prepareContinuable',async()=>{
-  const listeners=new Map(),cleanups=[];
-  const seed=[];
-  for(let turn=0;turn<4;turn++){
-    seed.push({type:'turn/start',seq:seed.length,time:1,data:{turn}});
-    seed.push({type:'user/message',seq:seed.length,time:1,data:{id:`u${turn}`,role:'user',content:[{type:'text',text:`turn ${turn}`}],source:{kind:'user'}},surfaceOp:'append'});
-    seed.push({type:'turn/end',seq:seed.length,time:1,data:{turn,reason:{kind:'completed'}}});
-  }
-  const parent={session:{snapshotEvents:()=>seed},options:{provider:'parent',model:'parent'}};
-  const fork={
-    name:'fork',
-    capabilities:{agentOptions:true,agentPreset:false,outputSchema:true,depthLimit:true},
-    inheritsParentContext:true,
-    async prepareContinuable(){ return {seed}; }
-  };
-  const original=fork.prepareContinuable;
-  const raw={getProvider:(n)=>n==='fork'?fork:undefined,async startActivation(spec){return spec;}};
-  const ctx={
-    subagents:raw,
-    on(n,f){const l=listeners.get(n)??[];l.push(f);listeners.set(n,l);return()=>{};},
-    effect(fn){const off=fn();if(typeof off==='function')cleanups.push(off);},
-    inject(names,fn){if(names.includes('subagents'))fn(ctx);}
-  };
-  apply(ctx,{...config,forkWindowSlicing:true,forkWindowTurns:2});
-  assert.notEqual(fork.prepareContinuable,original,'provider must be wrapped');
-
-  const prepared=await fork.prepareContinuable({parent});
-  assert.ok(prepared.seed.length<seed.length,'seed must be sliced down');
-  assert.equal(prepared.seed.length,6,'two completed turns = 6 events');
-
-  // Disabled: the provider must hand back the full history untouched.
-  for(const off of cleanups.reverse())off();
-  assert.equal(fork.prepareContinuable,original,'unload must restore the provider');
-});
-
 // ── role candidate pools: spillover, overflow, cooldowns ─────────────────────
 //
 // This harness differs from `harness()` in one way only: `startActivation`

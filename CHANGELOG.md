@@ -4,6 +4,24 @@
 
 **本项目是 [dingminhua/dsh-subagent-default-model](https://github.com/dingminhua/dsh-subagent-default-model)（MIT，Copyright (c) 2026 LaoDing）的衍生作品。** 3.0.0 之前的条目由原作撰写，其中的功能、修复与测试记录均属原作工作；本项目的改动从 **3.0.0** 起记录。
 
+## 4.1.0 (2026-10-29)
+
+这一版把「配好就不管」推进到「跑起来也能改」，并补上了一个此前**静默不可达**的坑。
+
+### Added
+
+- **运行中实时换模型（功能七）**：拦 `agent/request` waterfall，让一个正在跑的子代理在下一步请求就换到另一个模型/推理强度，不必中断或重派。覆盖按子代理 id 隔离、`agent/disposed` 时清理、主会话请求永不经过；agent-teams 成员可手动换（自动 failover 仍豁免团队）。继承来的 `reasoningEffort` 会被丢弃，避免「思考强度必须与供应商一致」的 provider 直接拒请求。
+- **`/subagent-role-router/route` 端点**：`GET route?childId=…` 查当前路由，`POST select` / `POST clear` 修改；POST 强制 `content-type: application/json`，等于顺带做 CSRF 防护。响应里带 `build`（`ROUTER_BUILD`），用来回答「磁盘上的改动到底有没有被 cordis 重载进去」。
+- **豁免规则（功能八）**：按 preset / cwd 前缀 / 名称前缀匹配，命中后可**完全豁免**（不注入路由）或**钉住出生模型**（只决定出生，不占候补工位、不参与轮换）。编辑器候选来自插件实际观察到的出生身份，持久化在 `~/.dsh/subagent-role-router-candidates.json`（≤200 条，按最后出现时间淘汰；preset id 的版本段入库前剥离）。
+- **原生白名单镜像（功能九）**：宿主 `subagent` 工具自带一份模型白名单，不在名单上的模型即使显式传参也会被拒 —— 也就是说，只在设置页配了路由，那条路由对显式派发其实是**不可达**的。现在把设置页的模型幂等镜像进去（`hostWhitelistModels` / `syncHostWhitelist` / `sameWhitelist`），并在 `tools/execute` 之前用白名单唯一匹配补全裸模型名的 provider（`planDelegatedModelRoute` / `repairDelegatedModelName`）；匹配不到或不唯一则不动。
+- **`GET /subagent-role-router/whitelist`**：解释上一次白名单同步的结果（同步失败只 warn，不拖垮插件）。
+
+### Changed
+
+- **已验证宿主版本 0.2.1-rc.2 → 0.2.1-rc.3**（当前桌面版内置核心）：`peerDependencies` 的三段区间本来就接住了 0.2.1 线，所以宿主侧无需改声明。`devDependencies` 仍锁 `0.2.1-rc.2` —— 试过抬到 rc.3，但 rc.3 的 `dsh-session` 带来 `dsh-scope@0.2.1-rc.3` peer，与其余仍解析在 rc.2 的 peer 树冲突（`npm install` 直接 `ERESOLVE`）。测试的约束是「能装能跑」，不是「跟宿主的补丁号一模一样」。
+- **测试 48 → 95 项，四组 → 九组**：新增 `live-route`、`exempt-rules`、`team-model`、`whitelist-sync`、`real-directory` 五组。
+- 文档更正：平台支持一节原先写「运行时代码不读文件系统」，功能八的出生身份缓存使其不再成立，已改为如实说明那一处 JSON 读写及其失败静默策略。
+
 ## 4.0.0 (2026-10-21)
 
 每个角色的路由从**一条**变成**一个候补队列**：同一个角色可以配多个模型，按忙闲顺延，全忙时溢出共享，失败进冷却。

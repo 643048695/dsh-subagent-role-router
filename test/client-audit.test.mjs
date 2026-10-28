@@ -53,6 +53,7 @@ function createMockContext(overrides = {}) {
   const effectCleanups = [];
   const slotInjections = [];
   const slotRegistrations = [];
+  const slotComponents = [];
 
   const fakeScope = overrides.settingsScope ?? {
     status: "ready",
@@ -132,8 +133,10 @@ function createMockContext(overrides = {}) {
       },
       register(opts, comp) {
         slotRegistrations.push(opts);
+        slotComponents.push(comp);
         return () => {
           slotRegistrations.splice(slotRegistrations.indexOf(opts), 1);
+          slotComponents.splice(slotComponents.indexOf(comp), 1);
         };
       }
     },
@@ -151,7 +154,8 @@ function createMockContext(overrides = {}) {
     effectCleanups,
     formsEffects,
     slotInjections,
-    slotRegistrations
+    slotRegistrations,
+    slotComponents
   };
 }
 
@@ -249,8 +253,23 @@ test("5. settings subscription & cards slots cleanup on formsCtx dispose and fib
 
   client.apply(ctx);
 
-  // Cards slots (3 items) and notice slot (1 item) should be registered (total 4)
-  assert.equal(slotRegistrations.length, 4, "Settings cards and chat notice node must be registered in slots");
+  // Cards slots (3 items), the chat notice node (1) and the live route picker
+  // (2 surfaces: session header + composer tool row) should be registered
+  // (total 6). The picker lives on the fiber, not on the forms scope, because
+  // it only needs `slots` + the model catalog.
+  assert.equal(slotRegistrations.length, 6, "Settings cards, chat notice node and both live route picker surfaces must be registered in slots");
+  assert.deepEqual(
+    slotRegistrations.map((entry) => entry.name).sort(),
+    [
+      "conversation.chat.node",
+      "conversation.input.right",
+      "conversation.session.header.actions",
+      "plugins.bundle.config",
+      "plugins.item",
+      "plugins.row.config"
+    ],
+    "every expected slot must be claimed exactly once"
+  );
 
   // Verify formsCtx.effect cleanup executes without error and disposes resources
   assert.ok(formsEffects.length >= 2, "Forms effects must include settingsScope and cards slot disposers");
@@ -260,9 +279,14 @@ test("5. settings subscription & cards slots cleanup on formsCtx dispose and fib
     cleanup();
   }
 
-  // Verify settings cards slots (3 items) were unregistered, only notice slot remains
-  assert.equal(slotRegistrations.length, 1, "Only chat notice slot should remain after formsCtx teardown");
-  assert.equal(slotRegistrations[0].name, "conversation.chat.node", "Remaining slot must be conversation.chat.node");
+  // Verify settings cards slots (3 items) were unregistered; the notice row and
+  // the picker are fiber-scoped, so they must survive a settings-only reload.
+  assert.equal(slotRegistrations.length, 3, "The notice row and both live route picker surfaces must survive a formsCtx teardown");
+  assert.deepEqual(
+    slotRegistrations.map((entry) => entry.name).sort(),
+    ["conversation.chat.node", "conversation.input.right", "conversation.session.header.actions"],
+    "Remaining slots must be the chat notice row and both live route picker surfaces"
+  );
 
   // Run full fiber teardown
   for (const cleanup of effectCleanups) {
@@ -384,6 +408,46 @@ test("10. serializeRolePool drops blank spare lanes but keeps half-filled ones o
   assert.deepEqual(plain(serialize(null)), []);
 });
 
+test("10b. exempt rules: normalize defaults, serialize drops pattern-less rows, halves block save", () => {
+  const client = loadClient();
+
+  // normalize: unknown/missing fields fall back to the documented defaults.
+  assert.deepEqual(plain(client.normalizeExemptRules({})), []);
+  assert.deepEqual(plain(client.normalizeExemptRules({
+    exemptRules: [
+      { pattern: "egm-goldfish-" },
+      { name: "n", match: "cwd", pattern: "/ws/.egm", provider: "p", model: "m", effort: "high" },
+      null,
+      { match: "warp", pattern: "x" }
+    ]
+  })), [
+    { name: "", match: "label", pattern: "egm-goldfish-", provider: "", model: "", effort: "" },
+    { name: "n", match: "cwd", pattern: "/ws/.egm", provider: "p", model: "m", effort: "high" },
+    { name: "", match: "label", pattern: "x", provider: "", model: "", effort: "" }
+  ], "unknown match kinds normalize to label and junk rows keep their pattern for editing");
+
+  // serialize: a pattern-less rule is meaningless (matches nothing) and is
+  // dropped; a provider pin without a model degrades to a plain exemption
+  // (the half-filled state itself is blocked from saving upstream).
+  assert.deepEqual(plain(client.serializeExemptRules([
+    { name: "kept", match: "preset", pattern: "egm-goldfish-", provider: "", model: "" },
+    { name: "no pattern", match: "label", pattern: "  " },
+    { name: "half pin", match: "label", pattern: "p-", provider: "only-provider", model: "" }
+  ])), [
+    { name: "kept", match: "preset", pattern: "egm-goldfish-", provider: "", model: "", effort: "" },
+    { name: "half pin", match: "label", pattern: "p-", provider: "", model: "", effort: "" }
+  ]);
+  assert.deepEqual(plain(client.serializeExemptRules(null)), []);
+
+  // A model pin without a provider blocks Save, exactly like a half-filled
+  // role lane.
+  assert.equal(client.exemptRuleIncomplete([{ provider: "p", model: "m" }]), false);
+  assert.equal(client.exemptRuleIncomplete([{ provider: "p", model: "" }]), true);
+  assert.equal(client.exemptRuleIncomplete([{ provider: "", model: "m" }]), true);
+  assert.equal(client.exemptRuleIncomplete([]), false);
+  assert.equal(client.exemptRuleIncomplete(null), false);
+});
+
 test("11. roleRouteIncomplete: blank lane is fine, half-filled lane is not", () => {
   const client = loadClient();
   const incomplete = client.roleRouteIncomplete;
@@ -411,6 +475,22 @@ test("12. roleSlotCooldownSeconds: defaults to 15, 0 is a valid value, out of ra
   assert.equal(norm(-1), 15);
   assert.equal(norm(1.5), 15);
   assert.equal(norm("abc"), 15);
+});
+
+test("12b. effortChoicesFor offers only declared efforts, never a guessed list", () => {
+  const client = loadClient();
+  const choices = client.effortChoicesFor;
+
+  // A model that declares nothing must yield nothing: offering low/medium/high
+  // here makes the host reject the next request with UNSUPPORTED_REASONING_EFFORT
+  // (observed live with sensenova/kimi-k3).
+  assert.deepEqual(Array.from(choices({ id: "m", reasoning: { efforts: [] } })), []);
+  assert.deepEqual(Array.from(choices({ id: "m" })), []);
+  assert.deepEqual(Array.from(choices(null)), []);
+  assert.deepEqual(Array.from(choices(undefined)), []);
+
+  const declared = choices({ id: "m", reasoning: { efforts: [{ id: "low" }, { id: "max" }] } });
+  assert.deepEqual(declared.map((c) => c.id), ["low", "max"]);
 });
 
 test("13. serializeDefaultModels writes both the pool and its first lane as the legacy triple", () => {
@@ -488,4 +568,333 @@ test("14. savedFormFingerprint covers the role pools, and seedFromSavedForm roun
   assert.equal(seed(null, { fallback: true }).fallback, true);
   assert.deepEqual(plain(client.normalizeDefaultModels(seed(JSON.stringify([{ provider: "x", model: "y" }]), {}))),
     [{ provider: "x", model: "y", reasoningEffort: "" }]);
+});
+
+test("15. the team birth model serializes and survives the fingerprint round-trip", () => {
+  const client = loadClient();
+
+  const serialized = client.serializeDefaultModels({}, [{ provider: "b", model: "bm" }], "round-robin", true, true, {
+    roleMode: false,
+    teamModel: { provider: "tp", model: "tm", effort: "high" }
+  }, {}, false);
+  assert.equal(serialized.teamModelProvider, "tp");
+  assert.equal(serialized.teamModelName, "tm");
+  assert.equal(serialized.teamModelEffort, "high");
+
+  // Empty effort means "the provider's default" and must stay empty — a half
+  // value would be sent to the provider and rejected.
+  const noEffort = client.serializeDefaultModels({}, [], "round-robin", true, true, {
+    teamModel: { provider: "tp", model: "tm", effort: "" }
+  }, {}, false);
+  assert.equal(noEffort.teamModelProvider, "tp");
+  assert.equal(noEffort.teamModelEffort, "");
+
+  // Fingerprints must differ when only the birth model differs, else a lagging
+  // mirror resurrects the old model after a save (same rule as the pools).
+  const base = { models: [], teamModelProvider: "", teamModelName: "", teamModelEffort: "" };
+  const withTeam = { models: [], teamModelProvider: "tp", teamModelName: "tm", teamModelEffort: "" };
+  assert.notEqual(client.savedFormFingerprint(withTeam), client.savedFormFingerprint(base));
+
+  const rebuilt = client.seedFromSavedForm(client.savedFormFingerprint(withTeam), {});
+  assert.equal(rebuilt.teamModelProvider, "tp");
+  assert.equal(rebuilt.teamModelName, "tm");
+  assert.equal(rebuilt.teamModelEffort, "");
+  assert.equal(client.savedFormFingerprint(rebuilt), client.savedFormFingerprint(withTeam));
+});
+
+// ── selection shim: directoryFor wrap + subagent-vs-parent routing ──────────
+// The shim makes theme/host model seats functional on subagent pages by
+// wrapping the host's ModelDirectoryResolver.directoryFor: every directory it
+// returns gets (1) the assertAvailable gate lifted on its prototype and (2) an
+// instance-level select() that reroutes subagent sessions to the plugin
+// endpoint while parents pass through untouched. All of it must restore on
+// dispose.
+
+test("selection shim reroutes subagent directory selects and passes parents through", async () => {
+  const client = loadClient();
+  const routed = [];
+  const passthrough = [];
+  const painted = [];
+  class FakeDirectory {
+    constructor(sid) {
+      this.sessionId = sid;
+      this.store = {
+        update(fn) {
+          const s = { status: "", pending: null, error: null, current: { provider: "old", model: "old", reasoningEffort: "high" } };
+          fn(s);
+          painted.push(s);
+        }
+      };
+      this.synced = 0;
+    }
+    assertAvailable() { throw new Error("model selection is unavailable for addressed subagent sessions"); }
+    syncInputs() { this.synced += 1; }
+    async select(selection) { passthrough.push(selection); return { ok: true, value: undefined }; }
+  }
+  const directories = {};
+  const resolver = {
+    directoryFor(sid) { return directories[sid] ??= new FakeDirectory(sid); }
+  };
+  const sessions = {
+    subagentAddress: (sid) => (sid === "child-1" ? { parentSessionId: "p", childSessionId: sid } : undefined),
+    getSnapshot: () => ({ byId: {} })
+  };
+  const handle = client.installSelectionShim(null, {
+    resolver: () => resolver,
+    sessions: () => sessions,
+    select: async (request) => {
+      routed.push(request);
+      return { ok: true, value: undefined };
+    },
+    sleep: () => Promise.resolve(),
+    attempts: 2
+  });
+  assert.equal(await handle.whenReady, true);
+
+  // Subagent: rerouted to the endpoint with the childId mapping; the RPC is
+  // never reached; the gate is lifted on the shared prototype.
+  const sub = resolver.directoryFor("child-1");
+  const out = await sub.select({ provider: "magpie", model: "m1", reasoningEffort: "high" });
+  assert.equal(out.ok, true);
+  assert.equal(routed.length, 1);
+  assert.equal(routed[0].childId, "child-1");
+  assert.equal(routed[0].provider, "magpie");
+  assert.equal(routed[0].model, "m1");
+  assert.equal(routed[0].reasoningEffort, "high");
+  assert.equal(passthrough.length, 0);
+  sub.assertAvailable();
+  assert.equal(painted[painted.length - 1].status, "ready");
+  assert.equal(painted[painted.length - 1].current.model, "m1");
+
+  // Parent: straight through to the real select.
+  const main = resolver.directoryFor("main-1");
+  await main.select({ provider: "magpie", model: "m2" });
+  assert.equal(passthrough.length, 1);
+  assert.equal(routed.length, 1);
+
+  // Dispose unwraps the instance select, the gate and the resolver.
+  handle.dispose();
+  assert.throws(() => sub.assertAvailable(), /unavailable/);
+  await sub.select({ provider: "x", model: "y" });
+  assert.equal(passthrough.length, 2);
+  assert.equal(routed.length, 1);
+});
+
+test("selection shim stays dormant while the resolver service never appears", async () => {
+  const client = loadClient();
+  const handle = client.installSelectionShim(null, {
+    resolver: () => undefined,
+    sessions: () => ({}),
+    select: async () => ({ ok: true, value: undefined }),
+    sleep: () => Promise.resolve(),
+    attempts: 3
+  });
+  assert.equal(await handle.whenReady, false);
+  handle.dispose();
+});
+
+test("selection shim waits for a late-mounted resolver, then wraps it", async () => {
+  const client = loadClient();
+  let resolver = null;
+  class FakeDirectory {
+    assertAvailable() { throw new Error("gate"); }
+    async select() { return { ok: true, value: undefined }; }
+  }
+  const handle = client.installSelectionShim(null, {
+    resolver: () => resolver,
+    sessions: () => ({ getSnapshot: () => ({ byId: {} }) }),
+    select: async () => ({ ok: true, value: undefined }),
+    sleep: () => new Promise((resolve) => setTimeout(resolve, 2)),
+    attempts: 40
+  });
+  await new Promise((resolve) => setTimeout(resolve, 12));
+  resolver = { directoryFor: () => new FakeDirectory() };
+  assert.equal(await handle.whenReady, true);
+  handle.dispose();
+});
+
+test("a picked model survives the directory the host rebuilds for a child", () => {
+  const client = loadClient();
+  const pick = { provider: "magpie", model: "workbuddy-ai/kimi-k3", reasoningEffort: "high" };
+
+  // Recorded under every id spelling the two halves of the app disagree on.
+  // (Field-by-field: the client lives in another vm realm, so deepEqual on
+  // the object would fail on prototype identity rather than on content.)
+  client.rememberPicked("session-abc", pick);
+  assert.equal(client.pickedFor("session-abc").model, "workbuddy-ai/kimi-k3");
+  assert.equal(client.pickedFor("abc").reasoningEffort, "high");
+
+  // A later session does not overwrite the first.
+  client.rememberPicked("def", { provider: "magpie", model: "group/dnq" });
+  assert.equal(client.pickedFor("session-abc").model, "workbuddy-ai/kimi-k3");
+
+  // Re-picking replaces the record; an incomplete selection is refused
+  // rather than stored as a half-written current.
+  client.rememberPicked("session-abc", { provider: "magpie", model: "group/dnq", reasoningEffort: "low" });
+  assert.equal(client.pickedFor("abc").reasoningEffort, "low");
+  assert.equal(client.rememberPicked("abc", { provider: "", model: "x" }), null);
+  assert.equal(client.pickedFor("abc").model, "group/dnq");
+  assert.equal(client.rememberPicked(undefined, pick), null);
+
+  // Reset forgets it under every spelling.
+  client.forgetPicked("abc");
+  assert.equal(client.pickedFor("session-abc"), null);
+  assert.equal(client.pickedFor("abc"), null);
+  assert.equal(client.pickedFor(undefined), null);
+});
+
+test("claimModelControl marks the composer card, never the whole document", () => {
+  const client = loadClient();
+  const attrs = {};
+  const card = {
+    getAttribute: (n) => (n in attrs ? attrs[n] : null),
+    setAttribute: (n, v) => { attrs[n] = v; },
+    removeAttribute: (n) => { delete attrs[n]; }
+  };
+  // The picker's root sits inside a composer card; `closest` finds it.
+  const insideCard = { closest: (sel) => (sel === "[data-composer-card]" ? card : null) };
+  // A picker rendered outside any composer card (header surface).
+  const outsideCard = { closest: () => null };
+
+  // Inactive: nothing is claimed.
+  const noop = client.claimModelControl(false, insideCard);
+  assert.equal(card.getAttribute("data-dsm-live-route"), null);
+  noop();
+
+  // Active: the mark lands on the composer card, so a parent conversation
+  // rendered beside this pane keeps its own seat.
+  const release = client.claimModelControl(true, insideCard);
+  assert.equal(card.getAttribute("data-dsm-live-route"), "1");
+  release();
+  assert.equal(card.getAttribute("data-dsm-live-route"), null);
+
+  // A pre-existing value is restored, not blindly deleted.
+  card.setAttribute("data-dsm-live-route", "kept");
+  const releaseKept = client.claimModelControl(true, insideCard);
+  assert.equal(card.getAttribute("data-dsm-live-route"), "1");
+  releaseKept();
+  assert.equal(card.getAttribute("data-dsm-live-route"), "kept");
+
+  // No DOM at all must not throw (the client also loads in a bare sandbox),
+  // and an anchor outside every composer card claims nothing.
+  for (const anchor of [null, undefined, outsideCard]) {
+    const safe = client.claimModelControl(true, anchor);
+    assert.equal(typeof safe, "function");
+    safe();
+  }
+});
+
+test("selection shim treats unknown sessions as parents, never reroutes them", async () => {
+  const client = loadClient();
+  const routed = [];
+  const passthrough = [];
+  class Dir {
+    constructor(sid) {
+      this.sessionId = sid;
+      this.store = { update() {} };
+    }
+    assertAvailable() {}
+    async select(selection) { passthrough.push(selection); return { ok: true, value: { passed: selection.model } }; }
+  }
+  const dirs = {};
+  const resolver = { directoryFor: (sid) => (dirs[sid] ??= new Dir(sid)) };
+  // No subagentAddress helper at all: only the snapshot origin may classify.
+  const sessions = {
+    getSnapshot: () => ({ byId: { "known-child": { origin: "subagent" } } })
+  };
+  const handle = client.installSelectionShim(null, {
+    resolver: () => resolver,
+    sessions: () => sessions,
+    select: async (request) => {
+      routed.push(request);
+      return { ok: true, value: undefined };
+    },
+    sleep: () => Promise.resolve()
+  });
+  await handle.whenReady;
+  const known = resolver.directoryFor("known-child");
+  await known.select({ provider: "a", model: "b" });
+  assert.equal(routed.length, 1);              // snapshot origin fallback caught it
+  assert.equal(routed[0].childId, "known-child");
+  const stranger = await resolver.directoryFor("who-is-this").select({ provider: "a", model: "b" });
+  assert.equal(stranger.value.passed, "b");
+  assert.equal(routed.length, 1);
+  handle.dispose();
+});
+
+// ── the captured context: helpers that render outside apply() ──────────────
+// resolveCurrentSessionId and hostSaysSubagent run in the picker's render path
+// and in the shim's late probes, i.e. outside apply(). They used to read a bare
+// `ctx`, which is not in scope at module level — `typeof ctx` is "undefined"
+// there and every lookup silently failed, so no session id ever resolved and no
+// subagent was ever recognised. These tests pin the captured-context contract.
+
+test("service lookups outside apply go through the captured context", () => {
+  const client = loadClient();
+  const sessions = {
+    subagentAddress: (sid) => (sid === "child-7" ? { parentSessionId: "p", childSessionId: sid } : void 0),
+    list: { getSnapshot: () => ({ current: "child-7", byId: { "child-7": { origin: "subagent" } } }) }
+  };
+  const ctx = {
+    get: (name) => (name === "sessions" ? sessions : name === "uiSession" ? { current: { value: { key: "child-7" } } } : void 0)
+  };
+  client.setPluginCtx(ctx);
+
+  // No override argument: the helper must reach the captured context by itself.
+  assert.equal(client.hostSaysSubagent("child-7"), true);
+  assert.equal(client.hostSaysSubagent("parent-1"), false);
+  assert.equal(client.resolveCurrentSessionId(undefined), "child-7");
+  assert.equal(client.resolveCurrentSessionId("explicit"), "explicit", "an explicit id always wins");
+
+  // A context whose services are absent must answer "not a child", never throw.
+  client.setPluginCtx({ get: () => void 0 });
+  assert.equal(client.hostSaysSubagent("child-7"), false);
+  client.setPluginCtx(null);
+  assert.equal(client.hostSaysSubagent("child-7"), false);
+});
+
+test("apply captures the plugin context so the picker can resolve a session", () => {
+  const client = loadClient();
+  const seen = [];
+  const ctx = {
+    get: (name) => (name === "uiSession" ? { current: { value: { key: "session-abc" } } } : void 0),
+    effect: (fn) => { const off = fn(); return () => off?.(); },
+    locale: { register: () => () => {}, bind: () => (key) => key },
+    slots: { inject: () => () => {}, register: () => () => {} },
+    settings: { scope: () => ({ status: "ready", value: {}, writable: true, subscribe: () => () => {} }) }
+  };
+  // Only the capture side matters here; the rest of apply is exercised elsewhere.
+  try { client.apply(ctx, {}); } catch (_e) { /* slots absent: capture already happened */ }
+  seen.push(client.resolveCurrentSessionId(undefined));
+  assert.equal(seen[0], "session-abc", "apply must publish its ctx to the module helpers");
+});
+
+test("settings card and row render without throwing (regression: an out-of-scope effect dep crashed the whole settings page)", () => {
+  const client = loadClient();
+  const { ctx, fakeScope, slotRegistrations, slotComponents } = createMockContext();
+  client.apply(ctx);
+
+  const bundleIndex = slotRegistrations.findIndex((entry) => entry.name === "plugins.bundle.config");
+  assert.ok(bundleIndex >= 0, "plugins.bundle.config must be registered");
+  const Card = slotComponents[bundleIndex];
+  assert.equal(typeof Card, "function", "registration must carry the card component");
+
+  const t = (key) => key;
+  // The stub React runs effects synchronously, so a render-time or effect-time
+  // ReferenceError (an out-of-scope identifier in a deps array, for example)
+  // throws right here instead of being swallowed by the host error boundary.
+  assert.doesNotThrow(() => {
+    Card({ view: "page", t, settingsScope: fakeScope });
+    Card({ view: "summary", t, settingsScope: fakeScope });
+  }, "the card must render for both views");
+
+  const Row = client.SubagentModelRow;
+  assert.equal(typeof Row, "function", "SubagentModelRow must be exported as a test seam");
+  assert.doesNotThrow(() => {
+    Row({
+      t,
+      settingsScope: fakeScope,
+      loadCatalog: () => Promise.resolve({ ok: true, value: { groups: [] } })
+    });
+  }, "the settings row must render");
 });

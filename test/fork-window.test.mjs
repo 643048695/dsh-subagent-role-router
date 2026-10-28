@@ -1,13 +1,52 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import { buildWindowSlicedSeed, isSurfaceEligibleType } from "../lib/fork-window.js";
-import { loadRealSession, SKIP_REASON } from "../tools/dsh-session-resolver.mjs";
 
-// Load the real Session module from wherever this machine keeps it. When none
-// is reachable the whole suite skips instead of failing — see the resolver.
-const real = loadRealSession();
-const Session = real?.Session;
-const skip = Session ? false : SKIP_REASON;
+/**
+ * Resolve a real `@deepseek-ai/dsh-session` module.
+ *
+ * The session package ships INSIDE `app.asar`, and plain Node cannot `require`
+ * a path inside an asar archive — only Electron's patched loader can. Depending
+ * on the install, it is therefore reachable from a few very different places:
+ *
+ *   1. a profile `node_modules` (when the host hoists packages there),
+ *   2. a vendored closure extracted from the asar (`_vendor/...` in the
+ *      workspace) — how this suite runs offline,
+ *   3. the asar path itself, which works only under Electron.
+ *
+ * Every candidate is tried in order. If none loads, the caller SKIPS the file
+ * instead of failing it: an environment that cannot supply the module says
+ * nothing about the slicing logic, and a red suite for a missing optional
+ * fixture trains people to ignore the suite.
+ */
+const require = createRequire(import.meta.url);
+const SESSION_CANDIDATES = [
+  // Explicit override for a checkout that vendors the closure elsewhere.
+  process.env.DSH_SESSION_MODULE,
+  // A normal install (profile node_modules, or the package installed as a dep).
+  "@deepseek-ai/dsh-session",
+  // Vendored closure extracted from app.asar — how this suite runs offline.
+  // Built by `_diag/vendor-asar-closure.cjs` in the dev workspace, which walks
+  // the asar import graph and hoists the whole closure into `node_modules/`.
+  "C:/Users/A6430/Documents/deepseek-harness/default-workspace/_vendor/dsh-session-closure/node_modules/@deepseek-ai/dsh-session",
+  "C:/Users/A6430/AppData/Local/Programs/DeepSeek Harness/resources/app.asar.unpacked/dsh/node_modules/@deepseek-ai/dsh-session",
+  "C:/Users/A6430/AppData/Local/Programs/DeepSeek Harness/resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-session"
+].filter((candidate) => typeof candidate === "string" && candidate.length > 0);
+
+let Session = null;
+for (const candidate of SESSION_CANDIDATES) {
+  try {
+    const loaded = require(candidate);
+    if (typeof loaded?.Session?.create === "function") { Session = loaded.Session; break; }
+  } catch { /* try the next candidate */ }
+}
+
+if (Session === null) {
+  test("fork-window slicing: SKIPPED, no loadable @deepseek-ai/dsh-session", (t) => {
+    t.skip("dsh-session is inside app.asar and not resolvable from plain Node; vendor it or run under Electron");
+  });
+} else {
 
 function createMultiTurnSession() {
 	const s = Session.create("s-parent-test");
@@ -89,7 +128,7 @@ function createMultiTurnSession() {
 	return s;
 }
 
-test("buildWindowSlicedSeed retains last 2 completed turns with tool calls and outputs intact", { skip }, () => {
+test("buildWindowSlicedSeed retains last 2 completed turns with tool calls and outputs intact", () => {
 	const parentSession = createMultiTurnSession();
 	const initialParentEventCount = parentSession.snapshotEvents().length;
 
@@ -131,7 +170,7 @@ test("buildWindowSlicedSeed retains last 2 completed turns with tool calls and o
 	assert.equal(msgs[3].source.provider, "p3");
 });
 
-test("buildWindowSlicedSeed retains last 3 completed turns including tool messages and tool calls", { skip }, () => {
+test("buildWindowSlicedSeed retains last 3 completed turns including tool messages and tool calls", () => {
 	const parentSession = createMultiTurnSession();
 
 	const sliced = buildWindowSlicedSeed({ session: parentSession }, 3);
@@ -156,7 +195,7 @@ test("buildWindowSlicedSeed retains last 3 completed turns including tool messag
 	assert.ok(assistantWithCall.content.some((b) => b.type === "tool-call" && b.id === "call_1"));
 });
 
-test("buildWindowSlicedSeed returns null when completed turns <= maxTurns", { skip }, () => {
+test("buildWindowSlicedSeed returns null when completed turns <= maxTurns", () => {
 	const parentSession = createMultiTurnSession();
 
 	// Parent has 4 completed turns. maxTurns = 4 -> no slicing needed
@@ -168,7 +207,7 @@ test("buildWindowSlicedSeed returns null when completed turns <= maxTurns", { sk
 	assert.equal(res10, null);
 });
 
-test("buildWindowSlicedSeed preserves prior compaction summary when slicing across it", { skip }, () => {
+test("buildWindowSlicedSeed preserves prior compaction summary when slicing across it", () => {
 	const s = Session.create("s-compaction-test");
 	// Turn 0
 	s.append("turn/start", { turn: 0 });
@@ -214,7 +253,7 @@ test("buildWindowSlicedSeed preserves prior compaction summary when slicing acro
 	assert.equal(msgs[0].source.kind, "plugin:dsh-subagent-role-router");
 });
 
-test("buildWindowSlicedSeed accepts completedSeed directly", { skip }, () => {
+test("buildWindowSlicedSeed accepts completedSeed directly", () => {
 	const parentSession = createMultiTurnSession();
 	const allEvents = parentSession.snapshotEvents();
 	const completedOnly = allEvents.slice(0, allEvents.findLastIndex((e) => e.type === "turn/end") + 1);
@@ -224,14 +263,14 @@ test("buildWindowSlicedSeed accepts completedSeed directly", { skip }, () => {
 	assert.equal(sliced[0].seq, 0);
 });
 
-test("buildWindowSlicedSeed returns null safely when no completed turns exist or input is invalid", { skip }, () => {
+test("buildWindowSlicedSeed returns null safely when no completed turns exist or input is invalid", () => {
 	assert.equal(buildWindowSlicedSeed(null, 2, null), null);
 	assert.equal(buildWindowSlicedSeed({}, 2), null);
 	assert.equal(buildWindowSlicedSeed({ session: { snapshotEvents: () => [] } }, 2), null);
 	assert.equal(buildWindowSlicedSeed(null, 2, [{ type: "user/message" }]), null); // no turn/end
 });
 
-test("summary content blocks are preserved without string coercion", { skip }, () => {
+test("summary content blocks are preserved without string coercion", () => {
 	const content = [{ type: "text", text: "Native summary blocks" }];
 	const events = [
 		{type:"compaction/summary",seq:0,time:1,data:{summary:content}},
@@ -246,7 +285,7 @@ test("summary content blocks are preserved without string coercion", { skip }, (
 	assert.notEqual(sliced[0].data.content, content);
 });
 
-test("cross-window header, replacement and source references safely fall back", { skip }, () => {
+test("cross-window header, replacement and source references safely fall back", () => {
 	const firstEnd = {type:"turn/end",seq:1,time:1,data:{turn:0,reason:{kind:"completed"}}};
 	const finalEnd = {type:"turn/end",seq:3,time:1,data:{turn:1,reason:{kind:"completed"}}};
 	for (const event of [
@@ -259,4 +298,4 @@ test("cross-window header, replacement and source references safely fall back", 
 		assert.equal(buildWindowSlicedSeed(null,1,events),null);
 		assert.equal(JSON.stringify(events),before);
 	}
-});
+});}

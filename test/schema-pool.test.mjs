@@ -66,3 +66,22 @@ test('resolveRolePool is exported and prefers the pool over the legacy triple', 
   ])
   assert.deepEqual(read(mod.resolveRolePool({}, 'patch')), [])
 })
+
+test('schema: the team birth model fields default to empty (team default wins)', () => {
+  const resolved = Config({})
+  assert.equal(read(resolved.teamModelProvider), '')
+  assert.equal(read(resolved.teamModelName), '')
+  assert.equal(read(resolved.teamModelEffort), '')
+  const filled = Config({ teamModelProvider: 'tp', teamModelName: 'tm', teamModelEffort: 'high' })
+  assert.equal(read(filled.teamModelProvider), 'tp')
+  assert.equal(read(filled.teamModelName), 'tm')
+  assert.equal(read(filled.teamModelEffort), 'high')
+  // teamBirthModel is exported for the wrapper and follows the same all-or-
+  // nothing rule: an empty effort is omitted, not sent as "".
+  const withEffort = read(mod.teamBirthModel({ getSection: () => ({ teamModelProvider: 'tp', teamModelName: 'tm', teamModelEffort: 'high' }) }))
+  assert.deepEqual(withEffort, { provider: 'tp', model: 'tm', reasoningEffort: 'high' })
+  const bare = read(mod.teamBirthModel({ getSection: () => ({ teamModelProvider: 'tp', teamModelName: 'tm', teamModelEffort: '' }) }))
+  assert.deepEqual(bare, { provider: 'tp', model: 'tm' })
+  assert.equal(mod.teamBirthModel({ getSection: () => ({}) }), undefined)
+  assert.equal(mod.teamBirthModel({ getSection: () => ({ teamModelProvider: 'p-only' }) }), undefined)
+})
