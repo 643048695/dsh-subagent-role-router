@@ -27,6 +27,7 @@ When a subagent is created without an explicit `model`, this plugin injects a co
 | **Mid-run model switching** (with a `/subagent-role-router/route` backend) | — | ✅ 4.1.0 |
 | **Exemption rules** (preset / cwd / name prefix, optional pinned birth model) | — | ✅ 4.1.0 |
 | **Native whitelist mirror + half-specified model repair** | — | ✅ 4.1.0 |
+| **Stop fallback** (a second interrupt when the child will not stop) | — | ✅ 4.2.0 |
 
 ---
 
@@ -190,6 +191,15 @@ From **4.1.0** the plugin mirrors the page's models into that whitelist (`hostWh
 `GET /subagent-role-router/whitelist` explains the last sync; a failed sync logs a warning and never takes the plugin down.
 
 
+## Capability 10: when the stop button does nothing, it gets a second try
+
+From **4.2.0** the stop button on a subagent page no longer "looks pressed but leaves the child running".
+
+The host resolves a stop by looking the child up in a resident-activation table and — **on a miss — returns silently**. The UI therefore reports "accepted", the button greys out, and the child keeps running, with nothing anywhere explaining it. This plugin wraps the shared cancel: it records what the host answered, asks again a moment later whether the child is still running, and if it is, re-interrupts through its own `/subagent-role-router/stop` endpoint using **both id spellings** (with and without the `session-` prefix) and **both authority shapes** (by parent session, by resident ancestor), reporting every attempt back to the UI. A refusal becomes a visible refusal instead of silence.
+
+The retry does not disturb work in flight: it sends the same interrupt again and reports honestly whether it took.
+
+
 ## Install
 
 Install from GitHub with the DSH plugin command:
@@ -332,7 +342,7 @@ npm install
 npm test
 ```
 
-**95 cases**, in nine groups:
+**101 cases**, in ten groups:
 
 - `test/fork-window.test.mjs` — window slicing mapping and safe fallback, validating seed contiguity against the real DSH `Session`.
 - `test/router-audit.test.mjs` — role detection, explicit override preservation, round-robin once per child, team exemption, unload restoration, main session unaffected, **a 0.2.x-shaped fork backend (only `prepareContinuable`, no `start`) still gets sliced**, and the capability 6 pool behavior: single-candidate equivalence, spillover when busy, `2/1/1` for 3 candidates with 4 concurrent tasks, lane hand-back, failure cooldown, zero cooldown, a fully cooled pool still serving, explicit models taking no lane, in-pool failover, and "unusable candidate" detection with its false-positive boundary.
@@ -343,6 +353,7 @@ npm test
 - `test/team-model.test.mjs` — agent-teams member model semantics and the automatic-failover exemption boundary.
 - `test/whitelist-sync.test.mjs` — capability 9: whitelist derivation, idempotent comparison, unique-match repair of half-specified model names, hands-off when the match is not unique, warn-only on failure.
 - `test/real-directory.test.mjs` — model-directory reading against an extraction of a real install; `skip`s when it cannot reach one.
+- `test/stop.test.mjs` — capability 10: the first id spelling is accepted, a throw on one spelling does not stop the sweep, a child with nothing to stop it reports why, and the resident-ancestor authority path is reached.
 
 > `fork-window.test.mjs` needs a **real** `@deepseek-ai/dsh-session`. `tools/dsh-session-resolver.mjs` looks in order: the `DSH_SESSION_PATH` environment variable → the `node_modules` dependency (hit right after `npm install`) → `~/.dsh/profiles/*/node_modules` → the platform DSH Desktop install directory.
 >

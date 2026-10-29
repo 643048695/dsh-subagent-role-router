@@ -898,3 +898,77 @@ test("settings card and row render without throwing (regression: an out-of-scope
     });
   }, "the settings row must render");
 });
+
+// ── stop fallback: a stop that the host accepts but never applies ──────────
+// The composer's stop button cancels through the host's interruptByParent,
+// which returns silently when the child is not in its resident table: the UI
+// reports success while the child keeps running. The plugin wraps the shared
+// Conversation.cancel to measure the outcome and re-interrupt through its own
+// endpoint when the child is still going.
+
+test("stop fallback re-interrupts a child the host left running", async () => {
+  const client = loadClient();
+  const posts = [];
+  const logs = [];
+  const running = { "child-1": true };
+  class FakeConversation {
+    constructor(sid) { this.sessionId = sid; }
+    async cancel() { return { ok: true, value: undefined }; }
+  }
+  const conversations = { "child-1": new FakeConversation("child-1"), "main-1": new FakeConversation("main-1") };
+  const sessions = {
+    scope: (sid) => ({ get: () => conversations[sid] }),
+    subagentAddress: (sid) => (sid === "child-1" ? { mode: "continuable", parentSessionId: "p-1", childSessionId: "child-1" } : undefined),
+    getSnapshot: () => ({ byId: { "child-1": { running: running["child-1"] === true }, "main-1": { running: false } } })
+  };
+  const handle = client.installStopFallback({
+    sessions,
+    post: async (action, payload) => { posts.push([action, payload]); return { ok: true, value: { ok: true } }; },
+    sleep: () => Promise.resolve(),
+    log: (tag, payload) => logs.push([tag, payload])
+  });
+  assert.equal(handle.installed, true);
+
+  await conversations["child-1"].cancel();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0][0], "stop");
+  assert.equal(posts[0][1].childId, "child-1");
+  assert.equal(posts[0][1].parentSessionId, "p-1");
+  assert.ok(logs.some(([tag]) => tag === "STOP_STILL_RUNNING"));
+  assert.ok(logs.some(([tag]) => tag === "STOP_FALLBACK"));
+
+  // A parent session has no address: nothing to re-interrupt.
+  await conversations["main-1"].cancel();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(posts.length, 1);
+
+  // Dispose puts the original cancel back.
+  handle.dispose();
+  assert.equal(conversations["child-1"].cancel, FakeConversation.prototype.cancel);
+});
+
+test("stop fallback stays quiet when the child really stopped", async () => {
+  const client = loadClient();
+  const posts = [];
+  const running = { "child-2": true };
+  class FakeConversation {
+    constructor(sid) { this.sessionId = sid; }
+    async cancel() { running[this.sessionId] = false; return { ok: true, value: undefined }; }
+  }
+  const conversations = { "child-2": new FakeConversation("child-2") };
+  const handle = client.installStopFallback({
+    sessions: {
+      scope: (sid) => ({ get: () => conversations[sid] }),
+      subagentAddress: (sid) => ({ parentSessionId: "p-2", childSessionId: sid }),
+      getSnapshot: () => ({ byId: { "child-2": { running: running["child-2"] === true } } })
+    },
+    post: async (action, payload) => { posts.push([action, payload]); return { ok: true }; },
+    sleep: () => Promise.resolve(),
+    log: () => {}
+  });
+  await conversations["child-2"].cancel();
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(posts.length, 0);
+  handle.dispose();
+});

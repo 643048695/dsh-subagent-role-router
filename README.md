@@ -27,6 +27,7 @@
 | **运行中实时换模型**（含 `/subagent-role-router/route` 后端） | — | ✅ 4.1.0 新增 |
 | **豁免规则**（按 preset / cwd / 名称前缀，可钉住出生模型） | — | ✅ 4.1.0 新增 |
 | **原生白名单镜像 + 半截模型名修复** | — | ✅ 4.1.0 新增 |
+| **停止失效兜底**（子代理停不下来时二次中断） | — | ✅ 4.2.0 新增 |
 
 ---
 
@@ -190,6 +191,15 @@ answer with this route. This line is system-provided context about the runtime, 
 `GET /subagent-role-router/whitelist` 会解释上一次同步的结果，同步失败只打 warn，不会让插件挂掉。
 
 
+## 功能十：停止按钮按不动的时候，替你补一刀
+
+从 **4.2.0** 起，子代理页面的停止按钮不会再「看起来点了、其实没停」。
+
+宿主处理停止时，先去一张「常驻激活表」里找这个子代理；**找不到就直接返回，什么都不说**。界面因此收到「已接受」，按钮变灰，子代理照旧在跑 —— 没有任何地方解释这件事。本插件把共用的取消动作包了一层：记下宿主的返回结果，一秒多之后再问一次「它还在跑吗」，还在就通过自己的 `/subagent-role-router/stop` 端点，用**两种 id 写法**（带 `session-` 前缀的与不带的）和**两种授权形状**（按父会话、按常驻祖先）逐個重试，并把每一次尝试的结果带回界面。拒绝于是变成看得见的拒绝，而不是静默。
+
+停止失败的重试**不影响**已经在跑的内容：它只是把同一个中断再送一次，成功与否都如实汇报。
+
+
 ## 安装
 
 通过 DSH 插件命令从 GitHub 安装：
@@ -332,7 +342,7 @@ npm install
 npm test
 ```
 
-共 **95 项**，分九组：
+共 **101 项**，分十组：
 
 - `test/fork-window.test.mjs` —— 窗口切片的映射与安全回退，用真实 DSH `Session` 验证种子的连续性合法性。
 - `test/router-audit.test.mjs` —— 路由判定、显式覆盖保留、round-robin 每子代理一次、团队豁免、卸载还原、主会话不受影响，**0.2.x 形状的 fork 后端（只有 `prepareContinuable`、没有 `start`）仍能被切片**，以及功能六的候补池行为：单候补等价性、忙闲顺延、3 候补 4 并发的 `2/1/1`、工位归还、失败冷却、冷却归零、全部冷却仍派发、显式模型不占工位、角色内 failover、以及「用不了的候补」的识别与误判边界。
@@ -343,6 +353,7 @@ npm test
 - `test/team-model.test.mjs` —— agent-teams 成员的模型语义与自动 failover 豁免边界。
 - `test/whitelist-sync.test.mjs` —— 功能九：白名单推导、幂等判等、半截模型名的唯一匹配修复、匹配不唯一时不动、同步失败只 warn。
 - `test/real-directory.test.mjs` —— 用真实安装目录的提取物核对模型目录读取；够不到时 `skip`。
+- `test/stop.test.mjs` —— 功能十：第一个 id 写法就被接受、某一种写法抛错后仍继续、没有任何可停对象时如实报告原因、能走到常驻祖先这条授权路径。
 
 > `fork-window.test.mjs` 需要一个**真实的** `@deepseek-ai/dsh-session`。`tools/dsh-session-resolver.mjs` 会按顺序找：环境变量 `DSH_SESSION_PATH` → `node_modules` 里的依赖（`npm install` 后即命中）→ `~/.dsh/profiles/*/node_modules` → 各平台 DSH Desktop 安装目录。
 >
