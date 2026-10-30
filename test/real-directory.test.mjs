@@ -14,10 +14,13 @@ import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-const HOST_BUNDLE = process.env.DSH_MODEL_SELECTION_SRC
-  ?? "C:/Users/A6430/Documents/deepseek-harness/default-workspace/_asar/inv/model-selection.js";
+// The extracted host bundle is machine-local, so it is opt-in: point
+// `DSH_MODEL_SELECTION_SRC` at the file to run these assertions, otherwise skip.
+const HOST_BUNDLE = (process.env.DSH_MODEL_SELECTION_SRC ?? "").trim();
 
-const skip = existsSync(HOST_BUNDLE) ? false : `host bundle not extracted at ${HOST_BUNDLE}`;
+const skip = HOST_BUNDLE !== "" && existsSync(HOST_BUNDLE)
+  ? false
+  : "DSH_MODEL_SELECTION_SRC is not set to an extracted host bundle";
 
 const clientSource = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
 

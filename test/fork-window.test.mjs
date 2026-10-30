@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
+import { loadRealSession, SKIP_REASON } from "../tools/dsh-session-resolver.mjs";
 import { buildWindowSlicedSeed, isSurfaceEligibleType } from "../lib/fork-window.js";
 
 /**
@@ -20,31 +20,15 @@ import { buildWindowSlicedSeed, isSurfaceEligibleType } from "../lib/fork-window
  * nothing about the slicing logic, and a red suite for a missing optional
  * fixture trains people to ignore the suite.
  */
-const require = createRequire(import.meta.url);
-const SESSION_CANDIDATES = [
-  // Explicit override for a checkout that vendors the closure elsewhere.
-  process.env.DSH_SESSION_MODULE,
-  // A normal install (profile node_modules, or the package installed as a dep).
-  "@deepseek-ai/dsh-session",
-  // Vendored closure extracted from app.asar — how this suite runs offline.
-  // Built by `_diag/vendor-asar-closure.cjs` in the dev workspace, which walks
-  // the asar import graph and hoists the whole closure into `node_modules/`.
-  "C:/Users/A6430/Documents/deepseek-harness/default-workspace/_vendor/dsh-session-closure/node_modules/@deepseek-ai/dsh-session",
-  "C:/Users/A6430/AppData/Local/Programs/DeepSeek Harness/resources/app.asar.unpacked/dsh/node_modules/@deepseek-ai/dsh-session",
-  "C:/Users/A6430/AppData/Local/Programs/DeepSeek Harness/resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-session"
-].filter((candidate) => typeof candidate === "string" && candidate.length > 0);
-
-let Session = null;
-for (const candidate of SESSION_CANDIDATES) {
-  try {
-    const loaded = require(candidate);
-    if (typeof loaded?.Session?.create === "function") { Session = loaded.Session; break; }
-  } catch { /* try the next candidate */ }
-}
+// Resolution lives in `tools/dsh-session-resolver.mjs`: env override, then the
+// installed dependency, then the per-platform host install. No absolute paths
+// are baked into this file — a published suite must not carry one machine's
+// directory layout (and certainly not its user name).
+const Session = loadRealSession()?.Session ?? null;
 
 if (Session === null) {
   test("fork-window slicing: SKIPPED, no loadable @deepseek-ai/dsh-session", (t) => {
-    t.skip("dsh-session is inside app.asar and not resolvable from plain Node; vendor it or run under Electron");
+    t.skip(SKIP_REASON);
   });
 } else {
 

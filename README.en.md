@@ -329,6 +329,17 @@ You can also edit the profile's patch file `~/.dsh/profiles/<profile>/cordis.pat
 
 > **Every field needs a default**: DSH's settings UI is built by `projectForm()`, which **drops** any field whose resolved value is `undefined`. A `z.string()` with no default effectively does not exist in the UI, and saving then reports the misleading `notApplied:ready:writable=true`.
 
+### Debug logging (off by default)
+
+The plugin writes **no log file** and appends to no path unless you ask it to:
+
+| Switch | Effect |
+| --- | --- |
+| env `DSH_SUBAGENT_ROLE_ROUTER_LOG` | When set to a file path, the backend appends stop/override diagnostics there. Unset, every call is a no-op. |
+| `?srrLog=1` on the page URL, or the same key in `localStorage` | Enables the client picker's debug channel. Unset, no debug request is sent. |
+
+> Earlier versions **hardcoded** the log path in the source. That cannot be written on anyone else's machine and leaks the local user name, so it is now the opt-in switch above; `test/no-hardcoded-paths.test.mjs` keeps it from coming back.
+
 ## Platform support
 
 **Windows, macOS and Linux are all supported**, with no platform-specific configuration: no process is spawned and `process.platform` is never consulted.
@@ -342,7 +353,7 @@ npm install
 npm test
 ```
 
-**101 cases**, in ten groups:
+**102 cases**, in eleven groups:
 
 - `test/fork-window.test.mjs` — window slicing mapping and safe fallback, validating seed contiguity against the real DSH `Session`.
 - `test/router-audit.test.mjs` — role detection, explicit override preservation, round-robin once per child, team exemption, unload restoration, main session unaffected, **a 0.2.x-shaped fork backend (only `prepareContinuable`, no `start`) still gets sliced**, and the capability 6 pool behavior: single-candidate equivalence, spillover when busy, `2/1/1` for 3 candidates with 4 concurrent tasks, lane hand-back, failure cooldown, zero cooldown, a fully cooled pool still serving, explicit models taking no lane, in-pool failover, and "unusable candidate" detection with its false-positive boundary.
@@ -354,6 +365,8 @@ npm test
 - `test/whitelist-sync.test.mjs` — capability 9: whitelist derivation, idempotent comparison, unique-match repair of half-specified model names, hands-off when the match is not unique, warn-only on failure.
 - `test/real-directory.test.mjs` — model-directory reading against an extraction of a real install; `skip`s when it cannot reach one.
 - `test/stop.test.mjs` — capability 10: the first id spelling is accepted, a throw on one spelling does not stop the sweep, a child with nothing to stop it reports why, and the resident-ancestor authority path is reached.
+
+- `test/no-hardcoded-paths.test.mjs` — the desensitization gate: no source, test or tool file may contain a local absolute path (user home, DSH Desktop install dir), with a self-check that the scan is not vacuous and that trace output stays env-gated.
 
 > `fork-window.test.mjs` needs a **real** `@deepseek-ai/dsh-session`. `tools/dsh-session-resolver.mjs` looks in order: the `DSH_SESSION_PATH` environment variable → the `node_modules` dependency (hit right after `npm install`) → `~/.dsh/profiles/*/node_modules` → the platform DSH Desktop install directory.
 >

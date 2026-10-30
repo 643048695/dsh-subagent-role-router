@@ -4,6 +4,21 @@
 
 **本项目是 [dingminhua/dsh-subagent-default-model](https://github.com/dingminhua/dsh-subagent-default-model)（MIT，Copyright (c) 2026 LaoDing）的衍生作品。** 3.0.0 之前的条目由原作撰写，其中的功能、修复与测试记录均属原作工作；本项目的改动从 **3.0.0** 起记录。
 
+## 4.2.1 (2026-10-30)
+
+### Fixed
+
+- **测试夹具里的本机绝对路径。** 4.2.0 清掉了运行时代码的写死路径，但测试没清：`test/fork-window.test.mjs` 里还列着作者的检出目录与两处 DSH Desktop 安装目录，`test/real-directory.test.mjs` 也把一个提取路径当默认值。仓库是公开的，这些字符串会连同本机用户名一起发出去，在别人机器上又指向不存在的位置。现在 `fork-window` 统一走 `tools/dsh-session-resolver.mjs`（跨平台、只认环境变量与平台默认位置），`real-directory` 改成只有设了 `DSH_MODEL_SELECTION_SRC` 才跑、否则如实 `skip`。
+
+### Added
+
+- **`test/no-hardcoded-paths.test.mjs`（3 项）**：扫描 `lib/`、`test/`、`tools/` 与根清单文件，出现用户主目录、Windows 用户目录、DSH Desktop 安装目录即失败；另有一项反向自检（扫到的文件数不足就判红），避免守卫因为「什么都没扫到」而永远通过，还有一项确认 `TRACE_PATH` 仍是环境变量门控、默认分支在任何 I/O 之前返回。
+
+### Changed
+
+- 测试 101 → 102 项（`real-directory` 的环境相关用例在不设环境变量时计为 skip），十组 → 十一组。
+- 文档补上 `DSH_SUBAGENT_ROLE_ROUTER_LOG` 与客户端 `?srrLog=1` 两个调试开关的说明——4.2.0 引入了它们却没写进 README。
+
 ## 4.2.0 (2026-10-30)
 
 ### Added

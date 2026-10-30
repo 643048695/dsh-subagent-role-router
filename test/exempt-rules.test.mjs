@@ -244,7 +244,7 @@ test('observed birth identities feed the point-and-pick candidates', async () =>
   // A spawn through the wrapper is recorded — the integration the editor's
   // pick list relies on (egm's exact dispatch shape).
   h.ctx.subagents.startActivation(goldfishSpawn({
-    request: { agentPreset: 'egm-goldfish-0.2.0', cwd: 'C:/rooms/.egm/review-abc' }
+    request: { agentPreset: 'egm-goldfish-0.2.0', cwd: '/work/rooms/.egm/review-abc' }
   }));
   const suggestions = birthSeenSuggestions();
   assert.ok(suggestions.some((item) => item.kind === 'label' && item.value === 'egm-goldfish-logic'));

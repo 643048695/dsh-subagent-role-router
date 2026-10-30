@@ -329,6 +329,17 @@ semver.satisfies(runtimeVersion, range, { includePrerelease: true })
 
 > **每个字段都必须有默认值**：DSH 的设置界面由 `projectForm()` 构建，它会**丢弃**解析值为 `undefined` 的字段。一个没有默认值的 `z.string()` 在界面上等于不存在，保存时就会报出误导性的 `notApplied:ready:writable=true`。
 
+### 调试日志（默认关闭）
+
+本插件**默认不写任何日志文件**，也不向任何路径追加内容。要排查问题时才显式打开：
+
+| 开关 | 作用 |
+| --- | --- |
+| 环境变量 `DSH_SUBAGENT_ROLE_ROUTER_LOG` | 设为文件路径后，后端把停止/覆盖等诊断行追加到该文件；不设则每次调用都是空操作。 |
+| 页面地址加 `?srrLog=1`，或 `localStorage` 里存同名开关 | 打开客户端选择器的调试通道；不设则不发任何调试请求。 |
+
+> 早期版本把日志路径**写死在源码里**（本机绝对路径）。那在任何别人的机器上都写不进去，还会泄露本地用户名，因此已改为上述可选门控；`test/no-hardcoded-paths.test.mjs` 会挡住它再回来。
+
 ## 平台支持
 
 **Windows / macOS / Linux 均受支持**，不需要任何平台专用配置：不派生进程，也不判断 `process.platform`。
@@ -342,7 +353,7 @@ npm install
 npm test
 ```
 
-共 **101 项**，分十组：
+共 **102 项**，分十一组：
 
 - `test/fork-window.test.mjs` —— 窗口切片的映射与安全回退，用真实 DSH `Session` 验证种子的连续性合法性。
 - `test/router-audit.test.mjs` —— 路由判定、显式覆盖保留、round-robin 每子代理一次、团队豁免、卸载还原、主会话不受影响，**0.2.x 形状的 fork 后端（只有 `prepareContinuable`、没有 `start`）仍能被切片**，以及功能六的候补池行为：单候补等价性、忙闲顺延、3 候补 4 并发的 `2/1/1`、工位归还、失败冷却、冷却归零、全部冷却仍派发、显式模型不占工位、角色内 failover、以及「用不了的候补」的识别与误判边界。
@@ -354,6 +365,7 @@ npm test
 - `test/whitelist-sync.test.mjs` —— 功能九：白名单推导、幂等判等、半截模型名的唯一匹配修复、匹配不唯一时不动、同步失败只 warn。
 - `test/real-directory.test.mjs` —— 用真实安装目录的提取物核对模型目录读取；够不到时 `skip`。
 - `test/stop.test.mjs` —— 功能十：第一个 id 写法就被接受、某一种写法抛错后仍继续、没有任何可停对象时如实报告原因、能走到常驻祖先这条授权路径。
+- `test/no-hardcoded-paths.test.mjs` —— 脱敏守卫：源码、测试与工具脚本里不得出现任何本机绝对路径（用户主目录、DSH Desktop 安装目录），并自检扫描范围非空；同时确认调试日志仍是环境变量门控。
 
 > `fork-window.test.mjs` 需要一个**真实的** `@deepseek-ai/dsh-session`。`tools/dsh-session-resolver.mjs` 会按顺序找：环境变量 `DSH_SESSION_PATH` → `node_modules` 里的依赖（`npm install` 后即命中）→ `~/.dsh/profiles/*/node_modules` → 各平台 DSH Desktop 安装目录。
 >
