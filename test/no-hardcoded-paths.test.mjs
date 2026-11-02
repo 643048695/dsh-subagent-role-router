@@ -69,5 +69,7 @@ test("trace output stays opt-in", () => {
   // environment variable, and the default branch must return before any I/O.
   const source = readFileSync(join(ROOT, "lib", "index.js"), "utf8");
   assert.match(source, /process\.env\.DSH_SUBAGENT_ROLE_ROUTER_LOG/);
-  assert.match(source, /if \(TRACE_PATH === ""\) return;/);
+  // One sink for every trace write, and it bails before any I/O when unset.
+  assert.match(source, /function appendStopLog\(line\) \{/);
+  assert.match(source, /if \(!target\) return;/);
 });

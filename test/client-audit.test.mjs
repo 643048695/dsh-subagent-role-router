@@ -163,7 +163,7 @@ test("1. Cordis apply injection: apply.inject and exports conform to Cordis cont
   const client = loadClient();
   assert.ok(typeof client.apply === "function", "client must export apply");
   assert.ok(Array.isArray(client.inject), "client must export inject array");
-  assert.deepEqual(Array.from(client.inject), ["slots", "locale", "uiConversation"], "inject should match expected services");
+  assert.deepEqual(Array.from(client.inject), ["slots", "locale", "uiConversation", "uiWorkspace"], "inject should match expected services (uiWorkspace opens a subagent's conversation from the critter panel)");
   assert.ok(Array.isArray(client.apply.inject), "apply function must carry inject property for direct Cordis usage");
   assert.deepEqual(Array.from(client.apply.inject), Array.from(client.inject), "apply.inject must match export inject");
 });
@@ -253,22 +253,26 @@ test("5. settings subscription & cards slots cleanup on formsCtx dispose and fib
 
   client.apply(ctx);
 
-  // Cards slots (3 items), the chat notice node (1) and the live route picker
-  // (2 surfaces: session header + composer tool row) should be registered
-  // (total 6). The picker lives on the fiber, not on the forms scope, because
-  // it only needs `slots` + the model catalog.
-  assert.equal(slotRegistrations.length, 6, "Settings cards, chat notice node and both live route picker surfaces must be registered in slots");
+  // Cards slots (3 items), the chat notice node (1), the live route picker
+  // (2 surfaces: session header + composer tool row), the header critters
+  // (1 surface, pinned to the header actions row) and the batch switch entry
+  // (1 surface, composer left row) should be registered (total 8). The picker,
+  // the critters and the batch entry live on the fiber, not on the forms
+  // scope, because they only need `slots`.
+  assert.equal(slotRegistrations.length, 8, "Settings cards, chat notice node, both live route picker surfaces, the header critters and the batch switch entry must be registered in slots");
   assert.deepEqual(
     slotRegistrations.map((entry) => entry.name).sort(),
     [
       "conversation.chat.node",
+      "conversation.input.left",
       "conversation.input.right",
+      "conversation.session.header.actions",
       "conversation.session.header.actions",
       "plugins.bundle.config",
       "plugins.item",
       "plugins.row.config"
     ],
-    "every expected slot must be claimed exactly once"
+    "every expected slot must be claimed exactly once (header.actions twice: picker + critters)"
   );
 
   // Verify formsCtx.effect cleanup executes without error and disposes resources
@@ -279,13 +283,20 @@ test("5. settings subscription & cards slots cleanup on formsCtx dispose and fib
     cleanup();
   }
 
-  // Verify settings cards slots (3 items) were unregistered; the notice row and
-  // the picker are fiber-scoped, so they must survive a settings-only reload.
-  assert.equal(slotRegistrations.length, 3, "The notice row and both live route picker surfaces must survive a formsCtx teardown");
+  // Verify settings cards slots (3 items) were unregistered; the notice row,
+  // the picker and the critters are fiber-scoped, so they must survive a
+  // settings-only reload.
+  assert.equal(slotRegistrations.length, 5, "The notice row, both live route picker surfaces, the header critters and the batch switch entry must survive a formsCtx teardown");
   assert.deepEqual(
     slotRegistrations.map((entry) => entry.name).sort(),
-    ["conversation.chat.node", "conversation.input.right", "conversation.session.header.actions"],
-    "Remaining slots must be the chat notice row and both live route picker surfaces"
+    [
+      "conversation.chat.node",
+      "conversation.input.left",
+      "conversation.input.right",
+      "conversation.session.header.actions",
+      "conversation.session.header.actions"
+    ],
+    "Remaining slots must be the chat notice row, both live route picker surfaces, the header critters and the batch switch entry"
   );
 
   // Run full fiber teardown

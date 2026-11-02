@@ -1,7 +1,7 @@
 {
   "name": "dsh-subagent-role-router",
-  "version": "4.2.1",
-  "description": "Route DSH subagent delegations to configured models: 3-role routing (explore / plan / patch) with per-role candidate pools (spillover, overflow, failure cooldowns), round-robin or random distribution, cross-provider failover, fork window slicing, and agent-teams exemption.",
+  "version": "5.0.0",
+  "description": "Route DSH subagent delegations: per-role candidate pools (spillover, overflow, failure cooldowns), round-robin or random distribution, cross-provider failover, fork window slicing, agent-teams exemption — plus observing and steering what is running: header critters with duration and token counts, mid-run and batch model switching, model-callable routing tools, SSE change push, and a stop fallback that turns a silent refusal into a visible one.",
   "keywords": [
     "deepseek-harness",
     "dsh",
@@ -18,7 +18,13 @@
     "provider-failover",
     "fork",
     "route-visibility",
-    "prompt-injection"
+    "prompt-injection",
+    "subagent-monitor",
+    "token-usage",
+    "batch-model-switch",
+    "mid-run-model-switch",
+    "sse",
+    "plugins"
   ],
   "author": "643048695",
   "license": "MIT",

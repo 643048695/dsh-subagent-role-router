@@ -21,12 +21,12 @@ import { buildWindowSlicedSeed, isSurfaceEligibleType } from "../lib/fork-window
  * fixture trains people to ignore the suite.
  */
 // Resolution lives in `tools/dsh-session-resolver.mjs`: env override, then the
-// installed dependency, then the per-platform host install. No absolute paths
-// are baked into this file — a published suite must not carry one machine's
-// directory layout (and certainly not its user name).
+// installed dependency, then the per-platform host install. No absolute path is
+// baked into this fixture — a published suite must not carry one machine's
+// layout (and certainly not its user name).
 const Session = loadRealSession()?.Session ?? null;
 
-if (Session === null) {
+if (Session === null || typeof Session.create !== "function") {
   test("fork-window slicing: SKIPPED, no loadable @deepseek-ai/dsh-session", (t) => {
     t.skip(SKIP_REASON);
   });

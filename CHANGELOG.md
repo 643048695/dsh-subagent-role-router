@@ -4,6 +4,39 @@
 
 **本项目是 [dingminhua/dsh-subagent-default-model](https://github.com/dingminhua/dsh-subagent-default-model)（MIT，Copyright (c) 2026 LaoDing）的衍生作品。** 3.0.0 之前的条目由原作撰写，其中的功能、修复与测试记录均属原作工作；本项目的改动从 **3.0.0** 起记录。
 
+## 5.0.0 (2026-11-02)
+
+这一版把两条开发线合成了一条。
+
+仓库此前一直在 4.x 上维护「派发」这一半：角色路由、候补池、故障转移、fork 切片、实时换模型、豁免规则、原生白名单镜像、停止兜底。桌面上实际在跑的插件版本另外长出了「观察与干预」这一半：批量换模型、标题栏小动物、模型可调用工具、SSE 推送，以及一轮订阅与渲染的性能收口。两条线的代码此前**没有一处共享** —— 装了市场版就没有小动物，用桌面版就没有 4.x 的停止兜底与实时换模型。5.0.0 之后它们是一份代码。
+
+### Added
+
+- **标题栏小动物（2.5.0）。** 会话标题行右端最多三只像素小人，一只对应一个正在运行的子代理，六个角色造型按 childId 哈希稳定分配。点开面板每行给出运行时长（`42秒` / `3分07秒` / `1小时05分`）与消耗（`1.2万 tokens`），两个数都取自宿主给子代理会话的投影（`subagentTiming`、`tokenUsage`）——没有为此新加端点、也不轮询。点一行用宿主自己的 `ctx.uiWorkspace.openSession` 进入那个子代理的对话（宿主子代理目录点开用的是同一个调用），点完面板自动收起；Tab 到某行按回车/空格同样能进。
+- **面板跟随与自适应（2.7.2 – 2.7.5）。** 面板按窗口定位：右边缘贴按钮、上下挑有空间的一侧展开、高度不超过窗口剩余空间，窗口缩放与滚动时跟着重算；高度上限约六成屏幕、超出在面板内滚动；宽度按内容收（`max-content` + `max-width`）；行文本是好读的预设短语，真实标签留在悬停提示里；路由未知时不印 `?/?`，开工时间未知时不印 `—`。
+- **批量换模型（2.4.0）。** 子代理卡片上的「⇄ 批量」：勾选目标、选模型与推理强度、应用。也可以只改强度保留各自模型，或者清除覆盖回到自动分配。可写范围与单点换模型一致：当前对话的直接子代理、设置页里的模型池、同一套强度校验与豁免规则。
+- **模型可调用工具（2.6.0）。** `subagent_routes_inspect` / `subagent_routes_update`：查每个子代理的实际路由、是否可写、模型池与各模型**自己声明**的强度；改单个、批量或团队成员，支持只改强度（`keep_model`）与重置（`reset`）。每个目标带独立 revision、整体带 epoch，批量可传 `expected_revisions` 做乐观并发；团队成员走 AgentTeams 的成员路由服务，保留成员名、childId、任务、attempt_id、消息队列与历史，服务不存在时明确报 `teams-unavailable`，绝不退回复制一份新成员。
+- **SSE 变更推送（2.7.0 – 2.7.1）。** `GET /subagent-router/events`：选路与清除立即广播，覆盖与故障切换按「提供方|模型|强度」签名去重后广播，25 秒心跳、hello 帧、仅回环可连。子代理卡片与批量入口因此**不再轮询**：改订宿主 sessions store（按运行中/来源/父会话/更新时间签名比对）加这路 SSE；窗口重新聚焦时核对一次；SSE 连续断 3 次自动降级为纯 store 信号并限速重试，恢复后自动升级回来。
+
+### Changed
+
+- **订阅收窄（2.7.6）。** 标题栏此前订阅整张会话表，任何会话的投影刷新都会重跑组件；子代理每多花一个 token 还会让整行重建（离线回放实测比无关刷新多一倍组件执行）。现在只订阅「这个父会话下面有哪些子代理在跑」折成的一个字符串签名，宿主对选择器结果按值比较（`useSyncExternalStoreWithSelector` → `Object.is`），签名没变就不重渲染；行数据在真正需要时从会话 store 现读。
+- **数字只在面板打开时算（2.7.6）。** 时长与 token 从行里移出，改成面板自己的状态，由一个共用的一秒计时器刷新（此前每行各挂一个 interval，40 行就是 40 个计时器）；面板关着时零成本，行顺序固定按 spawn 时间。
+- **SVG 缓存（2.7.6）。** 角色图形是静态的，按「阶段 + 角色」缓存同一个 React 元素，重渲染不再重建每只约 54 个 `<rect>` 的图形。
+- **小动物不再漂移（2.7.1）。** 此前写死 `top:47px/right:28px`，宿主界面加标签栏后正好压在标题栏空档；现在运行时测量标题行位置贴上去，窗口缩放、滚动、布局变化都跟随，量不到就留在按钮行原位。
+- **文档重写。** 中英文 README 补齐观察与干预四条能力、HTTP 端点表、工具表、调试开关，以及新的安装与发布说明（本仓库不发布到 npm，市场条目按仓库 URL 读根 `package.json`）。截图不再从上游仓库热链。
+
+### Fixed
+
+- **调试日志不再写死路径。** 停止兜底、`REJECT_NOT_LIVE`、`SET_OVERRIDE` 三处此前直接 `appendFileSync("C:/Users/<name>/.dsh/…")` —— 在任何别人的机器上必然失败且被静默吞掉。现在统一走可选的 `DSH_SUBAGENT_ROLE_ROUTER_LOG` 环境变量，不设就完全不落盘。
+- **测试夹具里的本机绝对路径。** `test/fork-window.test.mjs` 改走 `tools/dsh-session-resolver.mjs`；`test/real-directory.test.mjs` 只在设了环境变量时才跑，否则如实 skip。
+- **行数据首次出现时不再少一轮时长与 token**（此前新行先以空指标入列，要等下一次事件才补齐）。
+
+### Notes
+
+- 构建标记：`ROUTER_BUILD` = `2026-11-02.6`（后端本轮未改），`DSM_CLIENT_BUILD` = `2026-11-02.7`。用 `GET /subagent-router/route?childId=nothing` 可以确认实际加载的是哪一版后端。
+- 测试 **232 项：230 通过 / 0 失败 / 2 跳过**。两项跳过是 `real-directory` 的环境相关用例，不设环境变量时如实跳过。
+
 ## 4.2.1 (2026-10-30)
 
 ### Fixed
@@ -152,6 +185,244 @@
 
 - 2.1.4 之前的条目（含 2.1.4）为原作历史，完整保留以存档。其中提到的 `scripts/mock-llm-server.mjs`、`scripts/simulate-retry.mjs` 等脚本随原作 `plugin/` 目录发布，本分叉不再包含。
 - 已知边界：窗口切片取的是**事件级最近 N 轮**，不等于读取上下文压缩（ACP）的实际活动窗口；两者目标一致但不是同一数据源。
+
+## 桌面版 2.x 线（2.2.0 – 2.7.6）
+
+以下是桌面上实际在跑的那条线的历史，与上面的 4.x 条目是**并行开发的两个分支**（2.2.0 与 4.0.0 同为 2026-10-21）。5.0.0 把两条线合成了一份代码，条目保留原样以便对上当时的版本号。
+
+## 2.7.6 (2026-11-02)
+
+### Changed
+
+- **小动物不再跟着别人的 token 一起重画。** 以前标题栏订阅整张会话表，任何会话的投影刷新都会重跑组件；子代理每多花一个 token 还会让整行重建（实测比无关刷新多一倍组件执行）。现在只订阅「这个父会话下面有哪些子代理在跑」这一条折成字符串的签名，宿主按值比较，签名没变就不重渲染；行数据在真正需要时从会话 store 现读。
+- **时长和 token 只在面板打开时算，其余时间零成本。** 数字从行里移出，改成面板自己的状态，由一个共用的一秒计时器刷新（以前每行各挂一个 interval，40 行就是 40 个计时器）；面板关着时不会派生任何数字，行顺序也固定按 spawn 时间，不会因为新一轮 `since` 变化而重排。
+
+### Fixed
+
+- **同一只小动物的 SVG 只建一次。** 角色图形是静态的，按「阶段 + 角色」缓存同一个 React 元素，重渲染不再重建每只约 54 个 `<rect>` 的图形。
+- **行数据首次出现时不再少一轮时长/token**（此前新行先以空指标入列，要等下一次事件才补齐）。
+
+## 2.7.5 (2026-11-02)
+
+### Added
+
+- **点面板里的一行，直接跳到那个子代理的对话。** 用的是宿主自己的导航服务（`ctx.uiWorkspace.openSession`，宿主子代理目录点开用的是同一个调用），点完面板自动收起；键盘 Tab 到某行按回车/空格同样能进，鼠标悬停会说明这一点。
+
+### Fixed
+
+- **面板宽度按内容收，不再固定 320 像素留一片空白。** 改 `width:max-content` + `max-width:min(320px,86vw)`，行内间距 10 像素、短语不再抢剩余宽度、时长右对齐；内容短时面板就是那么窄，长 token 数也不会撑出屏幕。
+
+## 2.7.4 (2026-11-02)
+
+### Changed
+
+- **面板每行改成报数字：干了多久、花了多少 token。** 上一版每行只剩一句「正在认真打磨」，占着地儿却不说明状态；现在短语缩成 4 个字，后面紧跟运行时长（`42秒` / `3分07秒` / `1小时05分`，含已完成轮次的累计）和消耗（`1.2万 tokens`，按万/亿缩写）。两个数都直接取宿主给子代理会话的投影（`subagentTiming`、`tokenUsage`），没有新端点、不轮询；宿主没给数据时整列不显示，不会印出 `0 tokens`。
+
+## 2.7.3 (2026-11-02)
+
+### Fixed
+
+- **面板还是被裁。** 2.7.2 只给面板加了高度上限，但面板是挂在标题行按钮里的绝对定位元素，而宿主给那一行动作区设了固定高度加裁剪，结果面板左边一列和下面的行都被切掉。现在面板改成按窗口定位：每次打开都重新量按钮位置，右边缘贴按钮、上方或下方挑有空间的一侧展开，高度不超过窗口剩余空间；窗口缩放或滚动时跟着重算。量不到坐标时用样式表里的兜底位置，不会乱猜。
+
+## 2.7.2 (2026-11-02)
+
+### Changed
+
+- **子代理面板的行文本改成预设短语。** 以前把宿主给的原始标签直接印上去（`[agent:delegated review] Bounded…`），长标签被省略号切成看不懂的碎片。现在每个子代理按编号稳定挑一条短短语（正在努力工作 / 认真思考 / 埋头干活 …共 12 条，同一子代理始终同一条，不会乱跳），真实标签留在鼠标悬停提示里。
+- **面板不再跑出屏幕。** 子代理多的时候面板能长到几十行、越出窗口底部且无法滚动；现在高度上限约六成屏幕（最多 420px），超出部分在面板内滚动。
+- **未知字段不再占位。** 路由还没查到时不显示 `?/?`，开工时间未知时不显示 `—`，行里只留有意义的信息。
+
+## 2.7.1 (2026-11-02)
+
+### Changed
+
+- **LiveRoutePicker 不再每 5 秒轮询路由状态。** 子代理卡片改订两路事件信号：宿主 sessions store 的变化（按「运行中/来源/父会话/更新时间」签名比对，签名没变就不发请求）和插件自有的 `/subagent-router/events` SSE 通道（选路写入、覆盖生效、故障切换时后端主动广播，客户端按 childId 对号核对）。窗口聚焦或从后台回来时强制核对一次；路由实例 epoch 变化（插件重载）时全量补全。SSE 连续断 3 次自动降级为纯 store 信号，之后每 30 秒最多重试 3 次，恢复成功自动升级回来；全程不复活定时器，空闲会话周期请求为 0。
+- **标题栏小动物回归「锚在会话标题行右端」的本意。** 以前写死 `top:47px/right:28px`，宿主界面加标签栏后正好压在标题栏空档；现在运行时测量标题行的实际位置贴上去，窗口缩放、滚动、布局变化都会跟随，量不到就留在按钮行原位（绝不悬空盖东西）。
+
+### Added
+
+- **后端 SSE 广播端点 `GET /subagent-router/events`。** 选路/清除立即广播，覆盖与故障切换在真正改变生效路由时按「提供方|模型|强度」签名去重广播（同一子代理同一路由绝不刷屏），带 25 秒心跳与 hello 帧；仅回环地址可连。
+
+## 2.7.0 (2026-11-02)
+
+### Changed
+
+- **头部小动物与批量入口彻底不再轮询。** 头部「正在干活的子代理」以前每 1.8～5 秒问一次后端、批量入口每 5～15 秒探一次在场，多开会话时这些周期请求叠加造成卡顿。现在两者都改订阅宿主自己的会话状态（和原生目录下拉同一个数据源）：子代理出生/结束/运行状态由宿主推送，插件只在 store 变化时重算一次显示；批量入口只在「可选子代理集合的签名」变化时核验一次，窗口重新聚焦或打开卡片时才再核验。稳定挂机时周期请求为 0（白名单诊断端点新增 counters 计数器可自证）。
+- **子代理元数据只取一次种子。** 每个会话头挂载时向后端取一次「哪个模型、跑了多久」的种子数据，之后不再请求；没有种子也照常显示（商店优先，字段留空不编造）。
+- **秒数计时与动画拆开。** 面板里的运行秒数由每个单元格自己走 1 秒的表，不再让整个头部每秒重绘；窗口隐藏时动画整体暂停（data-anim-paused），诊断性的 DOM 普查只在调试日志开启时才跑。
+
+### Fixed
+
+- **没有父会话记录的活动条目不再泄漏给每个会话。** 以前 parentSessionId 为 null 的历史记录会出现在任何一个会话的头部/批量列表里，现在严格归属：只有明确属于当前会话的才显示，无主记录只出现在不过滤的全量清单里。
+
+
+## 2.6.0 (2026-11-01)
+
+### Added
+
+- **模型可以直接换子代理的模型了（不用一个个点界面）。** 新增两个工具：`subagent_routes_inspect` 查当前对话的子代理实际在跑什么模型、可写不可写、有哪些配置好的模型与强度；`subagent_routes_update` 支持指定子代理、指定团队成员，或「当前对话全部可写子代理」批量换模型/强度，也支持只改强度（keep_model）和重置（reset）。工具与界面共用同一套校验：只认当前对话的直接子代理、只认设置页配置的模型池、沿用强度能力校验与豁免规则，不会跨对话乱写。
+- **每次修改带修订号，避免互相覆盖。** 每个目标有独立 revision，整体有实例 epoch；轮询与界面按版本采纳，工具改完界面不会再被旧缓存拉回去，重置后也会清掉旧手选值。
+- **团队成员换模型（需要 AgentTeams 提供成员路由服务）。** 通过受控服务在同一个成员会话上改下一次请求的模型，保留成员名、childId、任务、attempt_id、消息队列与历史；服务不存在时工具明确报 `teams-unavailable`，绝不退回「删成员重建」。
+
+### Changed
+
+- 子代理页模型控件改为以服务端路由快照为准：有覆盖记进缓存、无覆盖清缓存、目录重建时按实际路由显示，修复了工具或另一个窗口改完之后界面仍显示旧模型的问题。
+
+## 2.6.1 (2026-11-01)
+
+### Fixed
+
+- **工具在真实宿主里注册不上（诊断端点显示两个工具都没装上）。** 原因是运行期动态 import 宿主的 `@deepseek-ai/dsh-tools` 在只发布 `lib/` 的插件里解析不到，失败又被静默吞掉。现在改成插件自带的编译层（`lib/tool-schema.js`），按宿主同一套 schema 子集把参数和输出编译成注册所需形状，不再依赖任何宿主包导入。
+- **「已安装」标记不再提前置真。** 以前先置 `true` 再等注册回调，导致白名单诊断端点报告了两个其实没注册的工具；现在只有注册成功才置真，注册被拒会把错误留在 `toolsError` 里，一眼能看出失败原因。
+
+## 2.5.4 (2026-11-01)
+
+### Fixed
+
+- **标题栏小动物不再每秒问一次后端，也不再每次回答都重画。** 原来固定 1.2s 轮询一次运行中子代理清单，不管有没有人在跑；现在有子代理在跑时 1.8s 一次，空着时 5s 一次，窗口在后台时 30s 一次。轮询回来的画面和上一帧完全相同时直接沿用旧数组，React 不再重渲染 —— 一个安静的会话，标题栏从每秒重画变成零重画。
+- **长时间会话里「正在运行 N 个子代理」不再越积越多。** 已结束但没被清理的活动记录现在会被真正删除（原来只是从返回结果里过滤掉，每条仍然陪着每次轮询走一遍），活动记录表另有 64 条上限。189 / 262 这种数字就是这些没被删掉的旧记录。
+- **展开面板最多列 40 行**，超出时标题里注明「只显示前 40 个」，不再一次渲染几百行。
+- **调试日志不再无限增长。** 浏览器端诊断上报改成默认关闭（需要时在控制台执行 localStorage["dsh-subagent-role-router:debug"]="1" 再刷新），服务端同一类诊断 30 秒最多写一行。原来每 1.2s / 5s 各写一行，日志已经涨到 7MB。
+- **子代理页的模型控件和批量入口也改成按需轮询**：控件只在路由真的变了才重画；窗口在后台时不轮询；当前对话没有可写子代理时，批量入口的探测间隔从 5s 放宽到 15s。
+
+## 2.5.1 (2026-10-31)
+
+### Changed
+
+- **动作幅度加大一档，节奏也加快。** 上一版整体位移只有 1–2px，在 24px 高的标题栏里几乎看不出来。这一版把整体位移提到 3–5px（打字手臂 5px、焊接横向抖动 4px、跑轮弹跳 3px、快递员 5px），周期同时压短（打字 0.34s、跑轮 0.2s、焊接抖动 0.16s、快递 0.34s），眼睛扫视和书页翻动也跟着放大。
+
+- **地面家具不再跟着角色一起飞。** 键盘、章鱼的小屏、仓鼠的跑轮、快递员的传送带原来是画在同一个图形组里，角色一弹跳桌子就离地。现在每个角色拆成两层：`-rig`（会动的身体）和 `-ground`（钉在地上的道具，先绘制、在角色后面）。仓鼠的轮子连辐条一起算地面件，所以是仓鼠在轮子里跳、轮子自己转，不再整只轮子跟着弹。
+
+## 2.5.0 (2026-10-31)
+
+### Added
+
+- **六种工作动画角色，每个子代理随机分到一个。** 标题栏原来只有一个小工匠，所有子代理长得一样。现在六个：**maker** 敲键盘（键盘按键逐个闪、手臂交替、头顶飘碎屑）、**octo** 五条触手轮流敲屏幕（屏幕光带闪）、**weld** 举焊枪打火花（身体微抖、护目镜反光、火花逐粒亮灭）、**hamster** 在八角轮里跑（轮子带辐条整体旋转、四腿交替）、**owl** 戴眼镜翻书（眼珠左右扫、书页翻动）、**courier** 抱着木箱走传送带（上下颠、两腿交替）。
+
+  分配规则：`pickCritterKind(childId, takenKinds)` 用 childId 的 FNV-1a 哈希取模，同一屏内已出现的角色不再重复（子代理多到超过六个时才会回收），所以同一个子代理每次刷新都长得一样、不同子代理基本不撞脸。
+
+  造型是纯 `rect` 拼的像素画（32×24，2px 一格，`shape-rendering: crispEdges`），全部动画用 CSS `steps()` 做逐帧感、不用缓动曲线；`prefers-reduced-motion: reduce` 下所有循环动画关闭。源码上是**一份数据表**（`CRITTER_ART`：每角色的部件坐标 + 主色/暗部色）加一个渲染器 `critterArt()`，CSS 由 `critterKindsCss()` 从同一张表生成，加第七个角色只需要往表里加一条。
+
+## 2.4.0 (2026-10-31)
+
+### Added
+
+- **批量换模型：一次把当前对话的所有直接子代理改成同一个模型与推理强度。** 输入框左侧行（`conversation.input.left`，order 5，排在 EGM 宠物左边）多了一个「⇄ 批量」入口，点开是一张向上展开的卡片：勾选哪些子代理、选哪个模型、选哪档推理强度，然后「应用」。卡片里也能「只改推理强度，保留各自模型」，以及「清除」这些子代理的覆盖，回到自动分配。
+
+  归属判定全在宿主侧，不在界面侧：前端只发 `parentSessionId` 与勾选的 `childId`，后端用**父会话自己的** `subagents.listChildren(parentSessionId)` 目录判定成员资格 —— `SessionHeader.parentSession` 是 fork 血缘、不是委派父，所以不能拿子会话的 header 反查父。写入前还会**再查一次**目录：列表是几秒前取的，期间子代理可能已结束。
+
+  - 只有 `mode === "continuable"` 的子代理可写；`one-shot`（已结束）、`external`（别的宿主拥有）、未知模式一律不可选，界面上标「已结束 / 外部会话 / 未知模式」。
+  - 被 `exemptRules` 命中的子代理不可写（团队插件成员照旧豁免）。
+  - 伪造的 `childId`、别的对话的子代理、主代理自身 → `not-owned`；`session-` 前缀与裸 id 归一后再比较。
+  - 父会话 ID 双拼写规范化：`strictChildrenOf` 调用 `subagents.listChildren(parentSessionId)` 时，若遇到找不到会话，仅尝试规范的候选双拼写（原样优先、备选重试，即裸 UUID 与 `session-` 前缀），两拼写均失败才报 `catalog-unavailable`，消除宿主 sessionQuery 对裸 ID 报 not found 的兼容问题。构建号升级至 `2026-10-31.2`。
+
+- **新增 `/subagent-router/batch` 三个端点**（同一 handler，自动继承 loopback-only / `application/json` / 8 KB body 这些既有闸门）：
+
+  - `GET /subagent-router/batch?parentSessionId=` → 直接子代理行（含 `selectable` / `reason` / 当前路由 / `pending`）与本页模型池（含每个模型可用的推理强度、配置来源）。
+  - `POST /subagent-router/batch/select` → `{ parentSessionId, selections: [{ childId, provider, model, reasoningEffort }] }`，或 `{ childId, keepModel: true, reasoningEffort }` 只改强度、保留该子代理当前（或已挂起覆盖里的）模型。
+  - `POST /subagent-router/batch/clear` → `{ parentSessionId, childIds }`。
+
+  应用是**逐个子代理**的：一个失败不中断其它，返回每一项的 `ok` 与错误码（`not-owned` / `ended` / `exempt` / `external` / `unknown-mode` / `model-not-allowed` / `effort-unknown` / `model-unknown`），外加 `summary.ok/failed`。
+
+- 模型池唯一来源仍是本页已保存的配置（基础池 + 单模型 + 三个角色池 + 团队模型按 provider/model 去重），每项带来源标签与配置里出现过的强度。
+
+  推理档位只能来自模型的真实能力：`llm.listModels(provider)` 只给名字，档位要逐个模型问 `llm.resolveModelInfo(provider, model).reasoning.efforts`（显示名用 `effort.name`）。结果按 provider 缓存 60 秒；问不出来时标 `capabilityKnown: false`，卡片只列配置里出现过的强度并注明「本页配置过的值」。
+
+  写入时的校验是**双轨**的：能力已知 → 强度必须在该模型目录声明的档位里（配置残留不再放行，`effort-unknown`）；能力未知 → 只接受配置里出现过的强度，其它一律 `effort-unverified`。两种情况下都不会给子代理塞一个它发不出请求的档位。
+
+- 界面层的口径：真实 HTTP 成功只表示「已设置，等待下次请求生效」；`pending` 由实际 `requestHeader().config` 与覆盖比对得出，不靠乐观猜测。`/route` 与批量行把**实际生效的路由**与**挂起的覆盖**分成两部分返回（`actual` / `override` / `pendingRoute`），没有 live 信息时 `actual` 就是 `null`，不拿覆盖值冒充现状。
+
+- 活跃判定纠正：宿主投影里的「inactive」只是空闲，不是结束。可写的条件是「在父会话目录里 + `continuable` + 仍注册在 agents 注册表里 + 没有正在关闭/已释放」，所以空闲的子代理照样能改，只有 `disposed` / `closing` 之类才报 `ending`，目录里已查不到活体则报 `unverified`。
+
+- 「保持不变」是第三种选择：卡片把推理强度分成「保持不变（`keepEffort`）/ 模型默认（清掉旧强度）/ 具体档位」三态；`keepEffort` 与 `keepModel` 同时出现是 `bad-request`，跨模型沿用旧档位若新模型不支持则如实报 `effort-unknown`，不静默降级。
+
+- 应用成功后会记住这次选择（`rememberPicked`），清除成功则忘掉（`forgetPicked`）；卡片刷新列表时保留用户原有勾选、不自动全选新行，部分失败时把失败项保留为勾选方便重试，结果逐项列在卡片底部。
+
+- 新增渲染级测试：一个只实现 `useState` / `useRef` / `useEffect` 的迷你渲染器驱动**真实卡片组件**，覆盖开合与几何（向上/翻下）、勾选与 `应用 (N)`、提交 payload 形状、部分失败后的勾选、清除失败的展示、目录不可用时的拒绝、切会话丢草稿。
+
+- 随后（同版本内迭代）按需求精简为**快捷开关模式**：卡片只剩「模型 / 推理强度 / 应用到当前对话」两个下拉、一个按钮与状态行，移除了子代理勾选名单、只改强度、清除覆盖与逐项结果列表。打开卡片读一次目录做预览，点击应用时**再读一次最新目录**并以该次结果为写入集合，自动作用于其中全部可写的直接子代理（可写数为 0 时拒绝写入并提示）；成功项照旧 `rememberPicked`，失败如实上报且可重试。入口仍按需显示，presence 探测保留 inFlight 合并、单 timer 链、乱序丢弃与卸载清理。上文「勾选 / 只改强度 / 清除 / 逐项结果」的描述仅适用于本版本早期构建，最终交付以本条为准；客户端构建号 `2026-10-31.4`。
+
+## 2.3.0 (2026-10-23)
+
+### Added
+
+- **运行中换模型：子代理跑着的时候，在标题栏点一下就换模型和推理强度。** 此前宿主的模型下拉在子代理会话里**不可用** —— `session/selectModel` 遇到 `origin === "subagent"` 直接回 `session/agent-busy`（`use subagent delivery for this child session`），前端 `conversation.input.model` 槽位在子代理窗口里也根本不渲染。于是「换掉这个正在跑的子代理的模型」唯一可行的办法是打断它再重新派发，上下文全部丢失。
+
+  现在子代理会话的 `conversation.session.header.actions` 槽位里多了一组控件：
+
+  - **模型下拉** —— 按 provider 分组的 `optgroup`，选项来自 `remote.session.modelCatalog()`（与设置卡片同一份目录）。
+  - **推理强度下拉** —— 只列出**该模型自己声明的** `reasoning.efforts`。
+  - **↺ 复位按钮** —— 仅在有手动覆盖时出现，点它清掉覆盖、回到自动分配。
+
+  生效机制：新增 `installChildRouteOverride()`，在 `agent/request` waterfall 上把该 child 的 provider/model/effort 改写。`agent/request` 是**每个 step 都会重走**的接缝（`prepareRequest` 在 `step()` 的循环里），因此下一个请求立即落在新模型上，无需重启、无需重新派发、上下文不丢。
+
+  **注册顺序是有意的**：cordis waterfall 按注册顺序执行、post-`next()` 代码按**逆序**回卷，所以**先注册者有最终发言权**。`installChildRouteOverride` 注册在 `installFailover` **之前**，保证用户亲手点的模型不会被自动故障转移悄悄换掉。同时 `failoverView()` 在覆盖存在时返回 `undefined`，因此也不会在用户背后写冷却计数。
+
+- **新增 loopback-only HTTP 端点 `/subagent-router`**（`GET route` / `POST select` / `POST clear`），用 `ctx.webServer.register({ kind: "prefix", ... })` 自建，`webCtx.effect` 负责释放。
+
+  为什么不复用宿主的 `/api` RPC：`connection.registerInterceptor` 对同一 channel **只允许一个** interceptor（`connection: shared RPC channel "/api" already has an interceptor`），而 api-gateway 已经占住了 `/api`，硬抢会把它顶掉；自己开一条前缀路由既不冲突，也不需要引入 `@deepseek-ai/dsh-typert-protocol`（插件 `dependencies` 里没有它，且 profile 的 `node_modules/@deepseek-ai` 只有 `cosmokit` 与 `schemastery`）。
+
+  安全约束照抄既有插件（git-graph）的做法：只允许 loopback（`127.0.0.1` / `::1` / `::ffff:127.0.0.1`，否则 403），非 POST 405，`content-type` 非 `application/json` 415（这条同时是 CSRF 硬化 —— 跨站表单发不出 `application/json`），body 上限 8 KB。
+
+### Fixed
+
+- **推理强度下拉会给「未声明强度」的模型编造 low/medium/high**，选中后宿主回 `UNSUPPORTED_REASONING_EFFORT` 并**直接结束该子代理的这一轮**。活体实测 `sensenova/kimi-k3` 的 `reasoning.efforts` 是空数组，而 `effortChoicesFor()` 当时回落到三档硬编码；子代理会话里可见 `turn/end reason: provider "magpie" model "sensenova/kimi-k3" does not support reasoning effort "high"`。现在 `effortChoicesFor()` **只返回模型自己声明的强度**，未声明就是空列表（该下拉为空），并把 `effortChoicesFor` 导出为 test seam。
+
+- **`liveSubagent()` 在 webServer 子 context 上查 `agents` 永远查不到**。`agents` 与 `webServer` 位于 fiber 树的不同层级，在 `ctx.inject(["webServer"], (webCtx) => ...)` 的回调里 `webCtx.get("agents")` 恒为 `undefined`，于是所有请求都返回 `not-live`。现在改为在**插件自己的 ctx** 上取一次 `agents`，再闭包进 handler（`const resolve = (childId) => liveSubagent(agents, childId)`）。
+
+- **未知路径报 `not-live` 而不是 404**。原实现先解析 child 再判断路径，路径拼错时会让人去查「子代理为什么不在线」。现在先判 `action`（`select` / `clear` / `undefined`），`undefined` 立即 404，再解析 child。
+
+### Tests
+
+- `node --test` → **57 tests / 57 pass / 0 fail**。
+- 新增 `test/live-route.test.mjs`（9 项）：覆盖压过 failover 且保留 `maxTokens`；覆盖只作用于自己那个 child；无 effort 的覆盖**丢弃**继承的 effort（`'reasoningEffort' in after === false`）；覆盖存活时 `agent/request-error` 返回原值不重试、无 cooling warn；`clear` 与 `agent/disposed` 都忘记覆盖；`GET route` 分别报告 live pair 与 pending override；未知 childId 与**主代理 session** 都回 `not-live`；loopback 403 / 非 JSON 415 / 空 provider 400 / 未知路径 404；卸载释放 HTTP 路由。
+- `test/client-audit.test.mjs` 新增 `12b`：`effortChoicesFor` 对未声明强度的模型返回空数组，只回显已声明的项。
+
+### Note
+
+- 前端构建标识 `SRR_CLIENT_BUILD` 递增为 `2026-10-23.02`。
+- **HMR 的重要限制（排查时必看）**：`@deepseek-ai/dsh-hmr` 的 `analyzeChanges()` 里 `const isExcluded = (url) => url.startsWith("node:") || url.includes("/node_modules/")` —— 本插件是通过 profile `node_modules` 的 junction 加载的，模块 URL 含 `/node_modules/`，因此**改 `lib/*.js` 不会触发热重载**。之前「等 3 分钟就生效」的观察其实是假象：那次生效的是 settings schema 字段，走的是 `cordis.patch.yml` 内容变化触发的 `reconcileProfile()` 配置路径，而不是模块重载。
+- 想让新代码生效：**动一下 profile 的 `cordis.patch.yml`**（哪怕只追加一行注释）触发 `reconcileProfile()`，实测约 20 秒后新模块加载完成；或者直接重启 DSH。
+- 版本序列：2.1.2 修「每步重复注入」→ 2.1.3 认证类失败也切换 → 2.1.4 修「注入内容滞后一步」→ 2.2.0 角色候补池 → 2.3.0 运行中换模型。
+
+## 2.2.0 (2026-10-21)
+
+### Added
+
+- **角色候补池：每个角色可配多条路由，按忙闲顺延、溢出并发、失败冷却。** 此前 `roleMode` 下每个角色（Explore / Plan / Patch）只有**一条**路由，同一角色派发两个子代理时两个都跑在同一个模型上，额度与延迟都无法分摊；而「多模型」能力（功能一）只作用于**共用**的 `models` 列表，与角色选择互斥。现在角色路由变成一个**候补队列**，队列长度即并发工位数：
+
+  - **行数＝工位数** —— 设置卡片里每个角色卡下方可「＋ 增加候补」/「－ 移除」，配 3 行就是该角色可同时跑 3 个。
+  - **忙则顺延** —— 第 1 个任务派候补 1；候补 1 仍在跑时第 2 个派候补 2，再候补 3。
+  - **满了共享** —— 全部在忙时**不排队**，派给当前占用最少者（并列取靠前），因此「3 候补 + 4 并发」得到 **2/1/1**。
+  - **失败进冷却** —— 失败的路由被暂停使用，后续派发直接跳过；时长由新增字段 `roleSlotCooldownSeconds` 控制，**默认 15 秒**，填 `0` 关闭。
+  - **全部冷却中仍派活** —— 不因冷却拒绝派发（那等于让子代理死掉），而是忽略冷却挑一个并打 warn，让降级可见。
+  - **冷却只影响新派发** —— 在跑的子代理由功能二就地切换，且切换范围限定在**该角色自己的候补队列内**，不会串到别的角色的模型上。
+  - **显式模型不占工位** —— 调用方自带 `agentOptions.model`/`provider` 的派发与 agent-teams 成员完全绕过候补池。
+
+  新增配置字段：`exploreModels` / `planModels` / `patchModels`（数组，`z.array(POOL_ENTRY)`，默认空 → 回落旧单值字段，因此**旧配置无需迁移**）、`roleSlotCooldownSeconds`（数字，默认 15）。旧单值字段 `exploreProvider/exploreModel/exploreEffort` 等**保留并继续被写入**（取队列首项），保证降级安装旧版本时配置不丢。
+
+- **候补队列的工位归还**：`acquireLane()` 在派发时占位，并挂到 `receipt.result` 上在子代理结算时归还；`original.apply` 同步抛错时立即归还。**活体验证**：连续两轮各 4 个并发子代理，两轮分布均为 2/1/1 —— 若工位不归还，第二轮会退化成 0/2/2。
+
+### Fixed
+
+- **「用不了的候补」会一直赢下工位然后失败**。实测发现：一个被网关以 `model [gpt-6.1-sol] is not allowed for user type [personal_free_user]` 拒绝的候补，被适配器 `classifyPiAiError` 归为通用的 `INVALID_REQUEST`，而该码不在 `FAILOVER_TRIGGER_CODES` 内 —— 于是它**既不顺延也不冷却**。它从不长时间运行，因此永远显示为空闲，每次派发都赢下工位再失败一次，把队列堵死。
+
+  修复：新增 `isUnusableCandidate(failure)`，把 `CANDIDATE_UNUSABLE_CODES`（`UNKNOWN_MODEL`/`NO_ADAPTER`/`UNSUPPORTED_REASONING_EFFORT`/`INVALID_CONFIG`）与**指名模型的 400**（`MODEL_UNAVAILABLE_PATTERN`：`model [x] is not allowed/available/permitted/...`、`no such model`、`knows no model`、`does not exist`、`is not allowed for user type`）识别为「候选不可用」，跳过并冷却，同时打一条**点名该路由**的 warn，提示删除或修正那一行。
+
+  **刻意保留的边界**：真正的请求格式错误（如 `messages[3].content: expected string`）仍是 `INVALID_REQUEST`，但**不**触发切换，直接抛出 —— 否则一个代码 bug 会把整个候补队列烧光，还会被伪装成「模型坏了」。
+
+### Tests
+
+- `node --test` → **47 tests / 47 pass / 0 fail**（原 16 项 + 新增 31 项）。
+- 新增 `test/schema-pool.test.mjs`（5 项）：池字段默认值；**无 `reasoningEffort` 的 entry 被接受**（`POOL_ENTRY` 存在的理由 —— `MODEL_ENTRY` 的对象分支把 effort 声明为必填，而 UI 序列化不带该键，复用会直接挡掉界面写入）；冷却 `0` 存活；旧单值字段仍可解析；`resolveRolePool` 池优先于单值。
+- `test/client-audit.test.mjs` 新增 6 项：`normalizeRoleRoutes`（池优先/回落单值/裸字符串/空值仍返回一行）、`serializeRolePool`（丢空行、空 effort 不写键）、`roleRouteIncomplete`（全空行 false、半填 true）、`normalizeRoleCooldownSeconds`（默认 15、**0 必须保留**、越界回落）、`serializeDefaultModels`（同时写池与旧三元组）、`savedFormFingerprint` + `seedFromSavedForm` 往返一致。
+- `test/router-audit.test.mjs` 新增 9 + 4 项：单候补等价性、顺延、溢出并发 `[2,1,1]`、工位归还、失败冷却、冷却到期、全部冷却仍派活并 warn、显式模型不受影响、角色内 failover；以及不可用候补的 4 项（见上）。
+- **修好长期失败的 `test/fork-window.test.mjs`**：它 `require` 了 asar 内的 `@deepseek-ai/dsh-session`，而普通 Node **无法 require asar 路径**（只有 Electron 打过补丁的 loader 可以）。改为候选列表（`DSH_SESSION_MODULE` 环境变量 → 裸包名 → 工作区 `_vendor` 闭包 → asar.unpacked → asar），全部不可用则 `t.skip()` 而非红。配套写了 `_diag/vendor-asar-closure.cjs`：解析 asar 头 → 从 entry 包递归扫描所有 import/require 说明符 → 抽出传递闭包并扁平化到 `<out>/node_modules/`（15 个包 / 1238 文件 / 10.05 MB），因为只抽单个包会 `ERR_MODULE_NOT_FOUND`。
+
+### Note
+
+- 前端 bundle 的构建标识 `SRR_CLIENT_BUILD` 递增为 `2026-10-21.01`；客户端与服务端新字段必须**同时**上线，否则设置卡片会写到服务端 schema 不认识的键上（被 `settings/mutate` 的 volatile 路径校验拒绝）。
+- 版本序列：2.1.2 修「每步重复注入」→ 2.1.3 认证类失败也切换 → 2.1.4 修「注入内容滞后一步」→ 2.2.0 角色候补池。
 
 ## 2.1.4 (2026-10-02)
 

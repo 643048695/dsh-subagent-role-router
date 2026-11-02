@@ -2,260 +2,258 @@
 
 English | [中文](README.md)
 
-Pick the route for [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness) subagent delegations: **per-role routing**, **several candidate models per role with spillover and overflow**, multi-model rotation, cross-provider failover, and **active-window slicing** for fork-style delegations.
+Route subagent delegations in [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness) and show what is running: per-role routing with a candidate pool per role, cross-provider failover, fork window slicing — plus header critters, mid-run and batch model switching, and model-callable routing tools. Configured through the plugin's own settings card (its Cordis `Config`), stored in the profile's `cordis.patch.yml`.
 
-When a subagent is created without an explicit `model`, this plugin injects a configured route — so every `subagent`, `subagent_fork`, and any tool that omits `agentOptions` routes through it. Explicit per-call overrides always win; an absent or incomplete settings section keeps the historical behavior (children inherit the parent route).
+When a subagent is created without an explicit `model`, this plugin picks a route for it — so every `subagent`, `subagent_fork`, and any tool that omits `agentOptions` routes through it. Explicit per-call overrides always win; an absent or incomplete settings section keeps the historical behavior (children inherit the parent route).
 
-> ### Origin and attribution
->
-> This project is a derivative work of [**dingminhua/dsh-subagent-default-model**](https://github.com/dingminhua/dsh-subagent-default-model) (MIT, Copyright (c) 2026 **LaoDing**).
->
-> The original provides the base capabilities: default-model injection, multi-model distribution strategies, cross-provider failover, and route visibility. This project adds **per-role routing**, **role candidate pools** (spillover, overflow, failure cooldowns), **fork active-window slicing**, and **agent-teams exemption** on top. The original copyright and license notice is preserved in full in [LICENSE](LICENSE).
+Once things are running, the plugin also gives the state back to you: pixel critters in the session header show who is working, for how long and how many tokens, and a click jumps straight into that subagent's conversation; the subagent header carries a model + reasoning-effort picker; a batch card rewrites every direct child at once; and a stuck subagent gets a second, visible stop attempt. **Dispatch, observation and intervention all live in one plugin.**
 
-## What this plugin adds over the original
+## Core capabilities
 
-| Capability | Original | This project |
-| --- | --- | --- |
-| Default-model injection | ✅ | ✅ |
-| Multi-model distribution (rotate / random) | ✅ | ✅ |
-| Cross-provider failover | ✅ | ✅ |
-| Route visibility (UI row + prompt injection) | ✅ | ✅ |
-| **Per-role routing** (explore / plan / patch) | — | ✅ new |
-| **Role candidate pools** (spillover / overflow / cooldown) | — | ✅ new |
-| **Fork active-window slicing** | — | ✅ new |
-| **agent-teams exemption** | — | ✅ new |
-| **Mid-run model switching** (with a `/subagent-role-router/route` backend) | — | ✅ 4.1.0 |
-| **Exemption rules** (preset / cwd / name prefix, optional pinned birth model) | — | ✅ 4.1.0 |
-| **Native whitelist mirror + half-specified model repair** | — | ✅ 4.1.0 |
-| **Stop fallback** (a second interrupt when the child will not stop) | — | ✅ 4.2.0 |
+This plugin answers two questions: **when a delegation does not name a model, which route should the subagent run on — and once it is running, how do you see it and how do you intervene?** The capabilities below are described with what each does *and* what it does not do — five about dispatch, four about observing and steering.
 
----
+### Capability 1 — Multi-model distribution: `round-robin` (sequential) or `random`
 
-## Capability 1: Per-role routing — explore, plan and patch each get their own model
+Configure a `models` list (2+ entries) and pick a `strategy` to decide how parallel delegations are spread across those routes:
 
-This is the project's main addition. With `roleMode` enabled, the plugin decides **what kind of work a delegation is** at dispatch time and sends it to that role's model:
+- **`round-robin` (sequential)** — take routes in list order: the 1st subagent gets route 1, the 2nd gets route 2, and so on, wrapping back to the start. **Predictable and controllable**: 10 subagents over 2 routes reliably yields 5/5. Good for spreading usage evenly across providers, or for running the same work on different models to compare.
+- **`random`** — pick a random route per delegation. **Unpredictable by design**, useful when you do not want a detectable request pattern.
 
-| Role | Kind of work | Typical use |
-| --- | --- | --- |
-| **explore** | Read-only investigation, search, explanation, review | Searching code, looking things up, explaining logic |
-| **plan** | Producing a plan, design, or task breakdown | Architecture design, implementation planning |
-| **patch** | Actually changing code, writing implementation | Editing files, fixing bugs, building features |
+Note this decides **which route serves the next subagent**, chosen at **delegation time**. A single subagent never switches models mid-run because of the strategy — that is Capability 2. With only one route configured, the strategy is meaningless.
 
-**Why it is worth doing**: different kinds of work need different models. Exploration reads a lot and writes little, so a cheap fast model is enough; patching must edit code precisely and deserves the strongest model available. Running both on one model either wastes an expensive model on exploration or leaves code edits to a model that is not smart enough.
+### Capability 2 — Cross-provider failover: if one provider is down, run on another provider's model
 
-Role detection has four tiers, from explicit to fuzzy:
+With `failoverEnabled` (on by default), when a subagent hits a **connection-class failure** mid-run, the plugin retries on another route from its own `models` list:
 
-1. **Explicit label** — the label or prompt contains `[explore]`, `[plan]`, or `[patch]` (also `[scout]`, `[planner]`, `[coder]`, and Chinese forms such as `【探索】`, `规划:`, `修补:`).
-2. **Source detection** — the BTW ("旁问") plugin's label prefix `michengai-btw:` is always explore, because BTW is read-only Q&A by nature.
-3. **Keyword fallback** — `explore`/`investigate`/`audit`/`explain`/`analyze`/`review` (and `探索`/`排查`/`解释`/`不理解`) map to explore; `plan`/`architect`/`design` (and `规划`/`架构`/`方案`/`设计`) map to plan; `patch`/`implement`/`fix`/`refactor`/`write_code` (and `修补`/`编写`/`实现`) map to patch.
-4. **Default** — anything unclassified is treated as **patch** (general purpose). This is deliberate: when in doubt, treat the work as "code will change", so a task that really does edit code never lands on a weak model.
+- **Provider-agnostic** — candidates come from the whole `models` list, so failover works **across providers**. If `deepseek-official/deepseek-v4-pro` dies, the subagent can fail over to a *different vendor's* model in the list — not merely another model ID from the same vendor.
+- **Two classes of trigger code** —
+  - **Connection-class**: `RATE_LIMIT`, `QUOTA`, `SERVER`, `TIMEOUT`, `TRANSPORT`, `EMPTY_RESPONSE`.
+  - **Auth-class**: `AUTH`, `INVALID_CREDENTIAL` (HTTP 401/403 — an invalid, expired, or unauthorised key).
+  - Auth-class failures **do** switch: when each provider holds its own credentials, one bad key must not kill the whole delegation while healthy providers sit unused.
+  - **But an auth switch always emits a warning** naming the provider whose key was refused. That is deliberate: switching buys resilience, and the **log line** is what keeps the misconfiguration from being silently hidden.
+  - Other codes (e.g. `NO_ADAPTER`, `CONTEXT_WINDOW_EXCEEDED`, `IMAGE_OFFLOAD_REQUIRED`) do **not** switch: another provider would fail identically, so switching would only bury the real error.
+- **Inherited reasoning strength is dropped** — after switching, the new provider/model is not sent the previous route's `reasoningEffort`; it resolves its own default. Otherwise a target that rejects that level can fail every request and burn through all remaining candidates.
+- **Sticky within a run** — after a switch, later steps of that same subagent stay on the new model instead of flip-flopping every step.
+- **Exhaustion passes the real error through** — once every candidate in the list has been tried, the real error surfaces; there is no infinite retry.
+- **Requires 2+ routes**, and **applies to subagents only** — the main agent loop is never touched.
 
-**Configuration**: enable `roleMode`, then fill `provider` / `model` / `effort` for each of the three roles (9 fields), or switch to capability 6's candidate pools (`exploreModels` / `planModels` / `patchModels`) so the same role can run several subagents at once. A role left empty **falls back to the `models` list** (capability 2's strategy), so you can differentiate only the roles you care about.
+### Capability 3 — Route visibility: you can see it, and so can the subagent
 
-**Relation to capabilities 2 and 3**: role routing decides *which model this delegation goes to* at dispatch time; the strategy decides *how parallel delegations are distributed*; failover decides *which route to switch to when one breaks* at runtime. All three are independent and can be enabled together.
+Of the five, this is the only one aimed at **both you and the subagent**: without digging through logs you see on screen which route the request landed on, and the **subagent's own context carries a line** so it can truthfully answer "which model are you?". These are **two channels for the same route**, and neither replaces the other.
 
-## Capability 2: Multi-model distribution — `round-robin` rotation / `random` pick
+#### Channel 1 — the UI row (for you)
 
-Configure a `models` list (≥2 entries) and choose a `strategy` to decide how parallel delegations are distributed across routes:
+- **Trajectory view** — each subagent's trajectory shows a row reading "**Current provider/model: `provider/model`**", rendered from the official `request/context` frame.
+- **Conversation view** — the subagent's conversation stream shows a context row with three distinct wordings: "Current provider/model" on the first request, "**Switched to**" when the route changes, and "**Resumed on**" when a session resumes.
+- **Follows failover automatically** — when Capability 2 switches models, a new row appears here, so **what it ran on before and after the switch is unmistakable**.
 
-- **`round-robin`** — takes routes in list order: the 1st subagent gets route 1, the 2nd gets route 2, and so on, wrapping to the start. **Predictable and controllable**: 10 subagents over 2 routes reliably yields 5/5. Good for consuming several providers' quota evenly, or for running the same work on different models to compare.
-- **`random`** — picks a random route on each delegation. **Unpredictable and without a fixed pattern**, for when you do not want request timing to look regular.
+How it looks in the conversation stream (the row itself):
 
-Note this distributes *which route runs the next subagent*; the strategy is decided at **dispatch time**, and a single subagent does not switch models mid-run because of it (mid-run switching is capability 3). With only 1 route configured the strategy is meaningless.
+![Current provider/model row in the conversation stream, screenshot from the upstream repository](https://raw.githubusercontent.com/dingminhua/dsh-subagent-default-model/main/assets/pic_03.png)
 
-## Capability 3: Cross-provider failover — when one is down, use another provider's model
+#### Channel 2 — the prompt injection (for the subagent)
 
-With `failoverEnabled` (on by default), a subagent that hits a **connection-class failure** mid-run automatically retries on another route from this plugin's `models` list:
-
-- **Provider-agnostic** — candidates come from the whole `models` list and **cross provider boundaries**. If the primary `deepseek-official/deepseek-v4-pro` goes down, the child can move to a model from another provider in the list, not merely a different model id from the same vendor.
-- **Two classes of trigger codes** —
-  - **Connection class**: `RATE_LIMIT`, `QUOTA`, `SERVER`, `TIMEOUT`, `TRANSPORT`, `EMPTY_RESPONSE`.
-  - **Auth class**: `AUTH`, `INVALID_CREDENTIAL` (HTTP 401/403 — a bad, expired, or unauthorised key).
-  - Auth-class failures **do** switch: when each provider has independent credentials, one provider's key going bad must not kill the whole delegation while healthy providers sit unused.
-  - **But every auth switch logs a loud warning** naming the provider whose credentials were refused. This is deliberate: switching serves availability, and the **log** keeps the misconfiguration from being silently hidden.
-  - Other failure codes (`NO_ADAPTER`, `CONTEXT_WINDOW_EXCEEDED`, `IMAGE_OFFLOAD_REQUIRED`, …) **do not** switch: another provider would fail the same way, and switching would only hide the real error.
-- **Inherited reasoning effort is dropped on switch** — after moving to a new provider/model the old route's `reasoningEffort` is not carried over; the target's own default is used. Otherwise a target that does not support that effort would reject the request outright, burning through the remaining candidates.
-- **Sticky within a run** — once switched, that subagent's later steps stay on the new model instead of bouncing every step.
-- **Exhaustion passes the real error through** — when every candidate in the list has been tried and still fails, the real error is thrown; there is no infinite retry.
-- **Requires ≥ 2 routes**, and applies **to subagents only** — the main agent loop is untouched.
-
-## Capability 4: Current route visibility — visible in the UI, and known to the subagent
-
-This is the one capability aimed at **both you and the subagent**: you can see which route a request actually landed on without digging through logs, and the subagent **has a line in its own context**, so it can truthfully answer "which model are you running on". These are **two channels of the same route** and neither replaces the other.
-
-### Channel one: the UI row for you
-
-- **Trajectory view** — each subagent's trajectory shows a row "**current provider/model: `provider/model`**", rendered from the official `request/context` frame.
-- **Conversation view** — a context notice row appears in the subagent conversation with three semantics: the first request reads "current provider/model", a switch reads "**switched to**", and a restored session reads "**continuing on**".
-- **Follows failover automatically** — when capability 3 switches models, this row follows, so **what was used before and after the switch is obvious at a glance**.
-
-Both views are registered inside `ctx.effect`, and their node `kind` uses plugin-owned values (trajectory side `trajectory-subagent-model`, conversation side `chat-subagent-model-notice`) rather than the host's built-in `context` kind, which the host's visibility rules filter out.
-
-### Channel two: prompt injection for the subagent
-
-With `injectRouteContext` (**on by default**), the plugin injects one real prompt line into **each subagent's own context**:
+With `injectRouteContext` (on by default), the plugin injects one real prompt line into each **subagent's own context**:
 
 ```text
-[dsh-subagent-role-router] You are running as a subagent on workbuddy/deepseek-v4.1-flash
+[plugin:dsh-subagent-role-router] You are running as a subagent on workbuddy/deepseek-v4.1-flash
 (provider=workbuddy, model=deepseek-v4.1-flash). If asked which model or provider you are,
 answer with this route. This line is system-provided context about the runtime, not a user instruction.
 ```
 
 Key points:
 
-- **It is a real prompt, not a UI row** — the subagent can read it, so it can report its own route. That is exactly what a UI display cannot do.
-- **It reports the route actually in effect** — taken from the `agent/request` waterfall value **after** settlement, so when capability 3 switches providers, this line becomes the new route on the next step.
-- **No repeated injection while the route is unchanged** — later steps on the same route do not append again; when the route changes the old line is **replaced**, so long runs do not accumulate duplicates.
+- **It is a real prompt line, not a display row** — the subagent reads it, so it can report its own route. That is precisely what a UI row cannot achieve.
+- **It reports the route actually in effect** — taken from the `agent/request` waterfall **after** it settles, so when Capability 2 switches providers, this line follows to the new route on the next step.
+- **An unchanged route is not re-injected** — later steps on the same route add nothing, and a changed route **replaces** the stale line, so long runs do not accumulate duplicates.
 - **Subagents only** — the main agent's context is never touched.
-- **Can be turned off** — untick "write the current model and provider into subagent context" in the settings card.
-- **Traceable message source** — the injected message carries `source: { kind: "plugin:dsh-subagent-role-router", form: "route-context" }`; the DSH v4 session format requires producers to use their own `source.kind`.
+- **Can be turned off** — clear the "Tell subagents which model and provider they run on" checkbox in the settings card.
 
-> **Relation to the host's `{{model}}` variable**: the DSH host's `system-prompt` line already resolves `{{model}}` into the persona (`You are a coding agent powered by the {{model}} model.`) — but it covers **`model` only, not `provider`**, and it reads the dispatch-time `agent.options`. This plugin's injection **adds the provider** and follows request-level route changes (including failover switches), so the two complement rather than duplicate each other.
+> **Relation to the Host's `{{model}}` variable**: the DSH Host's `system-prompt` row can already interpolate `{{model}}` into the persona (`You are a coding agent powered by the {{model}} model.`), **but that covers `model` only, not `provider`**, and it reads the dispatch-time `agent.options`. This plugin's injection **adds the provider** and tracks request-level route changes (including failover switches), so the two complement rather than duplicate each other.
 
-## Capability 5: Fork active-window slicing — fixing the long-session "BTW timeout"
+### Capability 4 — Role candidate pools: several models per role, spillover and overflow
 
-This is the project's second addition, and it addresses this: **in a long session, clicking "I don't understand this" — or any delegation that goes through `subagent_fork` — hangs until it times out.**
+Capability 1 answers "how do several subagents get spread over different models", but it assumes they are all the same kind of work. Delegation is actually role-shaped — explore, plan and general/patch tasks have very different price/quality tradeoffs. With `roleMode` on, the plugin detects the role from the delegation label and each role gets **its own** route instead of sharing one `models` list.
 
-**Root cause**: DSH's fork delegation copies **all raw parent-session events** into the child by default. Those events are **uncompressed** history — a 60-turn session has 6000+ events, about 25MB. That enormous seed has to be serialized, transported across processes, and rebuilt by the child session, which is where it stalls. The context you see in the UI was compressed long ago; the two are not remotely the same size.
+Since 2.2.0 a role route is no longer a single value but a **candidate queue**:
 
-**The fix**: `forkWindowSlicing` (on by default) takes only the most recent `forkWindowTurns` turns (3 by default) as the seed before a fork delegation, and rebuilds them into a legal event sequence numbered contiguously from `seq: 0`. Measured on a 60-turn session, the seed drops from ~25MB to ~5KB.
+- **One row = one lane** — each role card in the settings has "＋ Add candidate" / "－ Remove". Three rows means that role can run **three subagents at once**; keep one row to use only one.
+- **Spillover when busy** — task 1 goes to candidate 1; while candidate 1 is still running, task 2 goes to candidate 2; then candidate 3.
+- **Overflow shares** — with all three candidates busy, task 4 does not queue: it goes to the **least busy** candidate (lowest index on a tie). "3 candidates, 4 concurrent tasks" therefore lands as **2/1/1**, not 1/1/2 and not 1/1/1-plus-waiting.
+- **Cooldown after a failure** — a candidate that fails (rate limit, quota, timeout, transport, bad credentials, or "this model is not available to your account") is **paused**: later delegations skip it. The pause length is `roleSlotCooldownSeconds`, default **15 s**; 0 disables it.
+- **A fully cooled pool still works** — if every candidate is cooling down the plugin does not refuse the delegation (that would kill the subagent); it ignores the cooldowns, picks one, and logs a warning so the degradation is visible.
+- **Cooldown only affects new delegations** — running subagents are untouched; their failures are handled in place by capability 2's failover, and that failover is restricted to **this role's own candidate queue**.
+- **Explicit models take no lane** — a delegation that names its own `agentOptions.model`/`provider` (a pinned-model review task, say) and agent-teams members bypass the pool entirely and occupy no lane.
 
-**Where it hooks in**: the DSH 0.2.x fork backend (`@deepseek-ai/dsh-subagent-fork-in-process`) exposes exactly **one** method, `prepareContinuable(request)`, which returns `{ seed }` — the parent's full event prefix. There is no `start`, and no separate driver package to route around. So the plugin wraps just that one method: it takes the returned `{ seed }`, rewrites it, and hands it back. That is cleaner than the 0.1.x approach of calling the driver itself behind the provider's back — it does not duplicate the host's launch logic, so it cannot drift when the host implementation changes.
+Why cooldown rather than permanent eviction: rate limits and timeouts are **temporary**, so evicting forever would lock out a model whose quota has since recovered; the 15 s default rides out a burst without needing a human. Genuinely permanent problems (unknown model, model not permitted for the account) log a warning **naming the offending route on every failure** so the row gets fixed or removed — surfaced by the log instead of silently degrading.
 
-**Paranoid boundary handling** — slicing reorders events, and an incomplete mapping would produce a **corrupt context**, which is far worse than being slow. So the plugin **always gives up and falls back to native behavior** when:
+> This "an unusable candidate keeps winning a lane" case came out of a live run: a candidate refused by the gateway with `model [gpt-6.1-sol] is not allowed for user type [personal_free_user]` was classified as the generic `INVALID_REQUEST` (malformed request), so it neither fell through nor cooled down. It never ran long, so it always looked idle, won its lane on every delegation and failed once more. Model-naming 400s are now recognised as "candidate unusable", skipped and cooled; a genuinely malformed request still does **not** switch candidates — it surfaces immediately, so a code bug cannot burn the whole queue.
 
-- the parent events contain no complete `turn/end` (generation in progress);
-- a `developer/message` (tool definition) that must be retained cannot be mapped into the window;
-- `sourceEventSeqs` references do not all map;
-- a compaction summary's content blocks cannot be preserved verbatim (no stringification is done);
-- anything throws.
+### Capability 5 — Swap models while a subagent runs: one click, next step
 
-Better slow than wrong. Slicing **never modifies the parent session**; it constructs a new seed read-only.
+The host's model dropdown is **disabled inside subagent conversations**: `session/selectModel` rejects any session whose `origin === "subagent"` with `session/agent-busy`, and the front-end control is not even rendered for a subagent window. Before this, the only way to change a running child's model was to interrupt it and delegate again — losing all of its context.
 
-> Note: window slicing takes the most recent N turns **at event level**, which is not the same as reading the context-compaction (ACP) active window. Both aim at the same thing (being smaller), but they are not the same data source.
+From 2.3.0, a subagent conversation gets a **model dropdown plus a reasoning-effort dropdown** in the header on the right:
 
-**agent-teams exemption**: delegations for `agent-teams` team members are **not sliced**. Team collaboration depends on full history (captain and members need to see each other's exchanges), and slicing would drop key context. The plugin recognizes team members by the `agent-teams:` label prefix and by the child session's descriptor frame, and lets them through untouched.
+- **Applies from the next step** — no restart, no re-delegation. The plugin rewrites provider/model/effort on `agent/request`, the seam every step goes through, so the very next request lands on the new model. Nothing in the running context is lost.
+- **Effort changes too** — the second dropdown lists only the efforts the model itself declares (`reasoning.efforts` from the model catalog). A model that declares none gets no invented options: `sensenova/kimi-k3` declares an empty list, and forcing `high` on it makes the host answer `UNSUPPORTED_REASONING_EFFORT` and end the turn — so that dropdown stays empty for such models.
+- **Works on an idle child too** — a child that has not issued a request yet has no route to show, but the dropdown still accepts a pick; it takes effect on the next wake-up. The pick means "what the next step uses", not a persisted preference, and it is forgotten as soon as the child is disposed.
+- **↺ Reset** — after a manual pick a reset button appears; it drops the override and returns the child to whatever the plugin assigns automatically.
+- **A manual pick beats automatic failover** — once you have named a model, Capability 2 will not silently swap it away, and will not record that model in the cooldown list either. Click ↺ to hand routing back to the automatic path.
+- **Subagents only** — the control does not appear in a main conversation's header (the host's own dropdown covers that case).
 
-## Capability 6: Role candidate pools — several models per role, with spillover and overflow
+> Transport: the plugin registers its own loopback-only HTTP prefix route `/subagent-router` and the front end fetches it by document-relative path. The full endpoint table is in [HTTP endpoints](#http-endpoints). It deliberately does not reuse the host's `/api` RPC: that channel admits exactly one interceptor, which api-gateway already holds, so claiming it would displace it.
 
-Capability 1 answers "which model does each role get", but at that point each role could hold only **one** route. That leaves a very practical problem: **when two tasks of the same role arrive at once, the second one either queues or fights the first for the same model.**
+### Capability 6 — Header critters: who is working, for how long, how many tokens
 
-From **4.0.0**, each role's route is no longer a single value but a **candidate pool**:
+The right end of the session header carries up to three pixel figures, one per **running subagent of the current conversation**. Clicking opens a panel with one row per subagent:
 
-- **Rows = lanes** — the settings card offers "＋ Add candidate" / "－ Remove" under each role. Three rows means that role can run **three subagents at the same time**; keep one row if you only want one.
-- **Spillover when busy** — task 1 goes to candidate 1; while candidate 1 is still running, task 2 goes to candidate 2; if candidate 2 is busy too, task 3 goes to candidate 3.
-- **Overflow when full** — with all three candidates busy, the fourth task does **not** wait in a queue. It goes to whichever candidate currently carries the **fewest** tasks (ties broken by order). So "3 candidates, 4 concurrent tasks" distributes as **2/1/1**, not 1/1/2 and not 1/1/1 plus a queue.
-- **Failure cooldown** — when a candidate call fails (rate limit, quota, timeout, transport error, rejected credentials, and "this model is not available to your account" style **unusable** failures), that candidate is **paused** and later delegations skip it. The pause is `roleSlotCooldownSeconds`, default **15 seconds**; set `0` to disable it.
-- **A fully cooled pool still works** — if every candidate is cooling down, the plugin does **not** refuse the delegation (that would simply kill the subagent). It ignores the cooldowns, picks one anyway, and logs a warning so the degradation is **visible**.
-- **Cooldowns only affect new delegations** — a subagent already running is unaffected; its failures are handled in place by the capability 3 failover, and that failover is **confined to this role's own pool**, so it never jumps to another role's model.
-- **Explicit models take no lane** — a delegation that specifies its own `agentOptions.model` / `provider` (for example a fixed-model review task), and any agent-teams member, bypasses the pool entirely and occupies no lane.
-- **Old configuration keeps working** — if only the legacy triple (`patchProvider` / `patchModel` / `patchEffort`) is set, it is treated as a one-row pool and behaves exactly as before. When a pool is saved, its first row is mirrored back into those three legacy fields so you can roll back.
+- **Recognisable at a glance** — six role poses (typing, tentacle-tapping, welding, hamster wheel, reading, courier), assigned stably by a hash of the child id, so a given subagent always looks the same. All animation is off under `prefers-reduced-motion: reduce`.
+- **How long and how much** — each row shows elapsed time (`42秒` / `3分07秒` / `1小时05分`) and usage (`1.2万 tokens`). Both come from the host's own projection for the child session (`subagentTiming`, `tokenUsage`): **no extra endpoint, no polling**. When the host has no data, that part is simply not rendered instead of printing `0 tokens`.
+- **Click to open the conversation** — it calls the host's own navigation service (`ctx.uiWorkspace.openSession`), the same call the host's subagent catalog uses; the panel collapses afterwards, and Enter/Space work on a focused row. A failure logs `CRITTERS_OPEN_FAILED` rather than disappearing.
+- **Anchored to the button, follows the window** — on open it measures the button: right edge aligned, opened to whichever side has room, height capped by the remaining viewport. It recomputes on resize and scroll, and scrolls inside the panel when there are many subagents.
 
-**Why a cooldown instead of permanent removal**: rate limits and timeouts are **temporary**; removing a model forever would lock out a model whose quota has since recovered. 15 seconds is long enough to ride out a burst of rate limiting and short enough to need no manual intervention. Genuinely permanent problems (model does not exist, account lacks access) log a **warning naming that route on every failure**, telling you to delete or fix that row — exposed through logs rather than silently degraded.
+**Performance is a design constraint here, not a later fix**:
 
-> That "unusable candidate keeps winning the lane" behavior was found by testing: a candidate rejected by the gateway with `model [gpt-6.1-sol] is not allowed for user type [personal_free_user]` was originally classified as a generic `INVALID_REQUEST` (malformed request), so it neither failed over nor cooled down. It never ran long enough to look busy, so it won the lane on every delegation and failed once, blocking the queue. Such **model-naming** 400s are now recognized separately as "candidate unusable", skipped, and cooled down — while a genuinely malformed request (e.g. an invalid message shape) still does **not** trigger a switch and surfaces directly, so a code bug cannot burn through the whole pool.
+1. The header subscribes only to a *string signature* of "which subagents of this parent are running". The host compares selector results by value (`useSyncExternalStoreWithSelector` → `Object.is`), so an unchanged signature means **no re-render** — another session streaming tokens or another subagent running never wakes this header.
+2. Elapsed time and tokens are computed **only while the panel is open**, by a single one-second ticker; closed, it costs nothing and no subscription callback runs.
+3. Character art is cached per (phase, role) as the same React element, so a re-render never rebuilds the figure.
+
+`test/critters-render.test.mjs` (6 cases) pins all three down: the member signature ignores tokens/duration/unrelated sessions, the component does not re-execute when tokens change, membership changes re-render and reuse the same `<svg>`, there is no timer while closed and exactly one while open, and a departed subagent is not resurrected by stale data.
+
+### Capability 7 — Batch model switch: rewrite every direct child at once
+
+The subagent header has a "⇄ 批量" (batch) entry that opens a card pointing upwards: tick the subagents, choose a model and a reasoning effort, apply. You can also change only the effort while keeping each model, or clear all overrides back to automatic assignment.
+
+The writable scope is identical to the single-target picker: only **direct** children of the current conversation, only models configured in settings, with the same effort validation and the same exemption rules. When there is nothing writable, the card says so instead of offering a dead button.
+
+### Capability 8 — The model itself can query and change this routing
+
+Two tools let the model inspect and rewrite subagent routing without a human clicking the UI:
+
+- **`subagent_routes_inspect`** — the actual route of every subagent in the current conversation, whether it is writable, plus the configured model pool and the efforts each model *declares*.
+- **`subagent_routes_update`** — target one subagent, a team member, or "every writable subagent in this conversation"; change models and efforts; change only the effort (`keep_model`) or reset (`reset`).
+- **Every change carries revisions** — each target has its own revision and the instance has an epoch, so a tool edit is not dragged back by a stale UI cache. Batch edits accept `expected_revisions` and fail as a whole rather than overwriting each other.
+- **Team members** — a member's next request is retargeted through the AgentTeams member-route service while keeping the member name, child id, task, attempt id, mailbox and history. When that service is absent the tool reports `teams-unavailable` explicitly and **never** falls back to deleting and recreating the member.
+
+### Capability 9 — Stop fallback: a second, visible attempt when a subagent will not stop
+
+When the host handles a stop request it looks the subagent up in the resident activation table and, **if it is not there, returns silently** — the UI reports "accepted", the button greys out, the subagent keeps running, and nothing says why.
+
+This plugin now wraps the shared cancel action: it measures the host's return value, re-checks the running state about a second later, and if the child is still running retries the interrupt through its own `/subagent-router/stop` endpoint — covering both id spellings (with and without the `session-` prefix) and both authorization shapes (parent session, resident ancestor) — and reports every attempt's outcome back to the UI. **A refusal becomes a visible refusal.**
 
 ### Other configuration
 
-- **Single model** — configure one route with just `provider` + `model`; every subagent runs on the same model (the degenerate form of capabilities 1 and 2).
-- **Reasoning effort** — each model entry may specify `reasoningEffort` (e.g. `high`, `medium`, `low`); the Web UI loads the available efforts from the model catalog and validates the declaration.
-- **Hot reload** — settings changes apply to the next delegation.
-- **Clean unload** — the original service methods are restored on Cordis dispose, without overwriting later wrappers.
+- **Single model** — configure just `provider` + `model`; every subagent runs on that one model (the degenerate form of Capabilities 1 and 2).
+- **Reasoning strength** — optionally set `reasoningEffort` per model entry (e.g. `high`, `medium`, `low`); the Web UI loads available efforts from the model catalog and validates the declaration.
+- **Hot-reload** — settings changes apply to the very next delegation.
+- **Clean teardown** — Cordis disposal restores the original service methods.
 
-## Capability 7: switch a running subagent's model — no need to wait it out
+## Screenshots
 
-From **4.1.0** a subagent that is **already running** can be re-pointed at another model (and reasoning effort) from the chat UI, without interrupting it or dispatching it again:
+Screenshots are not shipped in this repository yet (they live under `_work/`, which is scratch space). The settings panel, the header critters, the batch card and the route row are all visible as soon as the plugin is installed.
 
-- The subagent's card and notice strip carry a "switch model" control. A switch applies to its **next request**; everything it has already produced stays.
-- The mechanism is the `agent/request` waterfall: each child request gets its `provider` / `model` / `reasoningEffort` rewritten. The inherited `reasoningEffort` is dropped first — it belongs to the route being replaced, and a provider whose thinking level must agree with the effort rejects the mismatch outright.
-- An override is scoped to **one child** and removed on `agent/disposed`. The main session's requests never pass through this code.
-- agent-teams members can be switched by hand too; the automatic failover still exempts teams (see capability 3) — automatic and manual are different things.
-- The host serves `/subagent-role-router/route`: `GET route?childId=…` reads, `POST select` / `POST clear` writes. POST requires `content-type: application/json` on purpose — a cross-site form cannot send that without a CORS preflight, so it doubles as CSRF hardening.
-- To check whether an edit on disk actually got reloaded by cordis, probe `GET /subagent-role-router/route?childId=nothing` and read the `build` field (`ROUTER_BUILD`, bumped on every behavioural change).
+## Marketplace
 
-## Capability 8: exemption rules — some subagents should not be routed
-
-A rule set matched on **preset / cwd prefix / name prefix**. A matching delegation is either:
-
-- **fully exempt** — no route injected, the child inherits the parent session; or
-- **pinned to a birth model** (`exemptBirth`) — a model chosen by the rule, but only for the moment of birth: it takes no lane in the pool and never joins rotation.
-
-The editor does not ask you to type a prefix. The plugin sees every child's birth identity as it crosses the wrapper and records these in `~/.dsh/subagent-role-router-candidates.json` (at most 200 entries, evicted by last-seen), and the dropdown offers them. Preset ids embed a version (`egm-goldfish-0.2.0`); the version segment is stripped before storing, so the prefix keeps matching after a plugin upgrade.
-
-## Capability 9: mirror the routes into the host's native whitelist
-
-The host's `subagent` tool keeps a **whitelist of its own**: a model absent from it is refused even when you pass it explicitly. So a route configured only in the settings page is effectively **unreachable** for explicit dispatches.
-
-From **4.1.0** the plugin mirrors the page's models into that whitelist (`hostWhitelistModels` / `syncHostWhitelist`, idempotent, with `sameWhitelist` guarding needless writes), and repairs half-specified model names before `tools/execute` runs: when a tool call carries a bare `model` (`claude-x`) but the host wants `provider/model`, the provider is filled in from the single matching whitelist entry (`planDelegatedModelRoute` / `repairDelegatedModelName`). No match, or more than one, means **hands off** — guessing wrong is worse than not guessing.
-
-`GET /subagent-role-router/whitelist` explains the last sync; a failed sync logs a warning and never takes the plugin down.
-
-
-## Capability 10: when the stop button does nothing, it gets a second try
-
-From **4.2.0** the stop button on a subagent page no longer "looks pressed but leaves the child running".
-
-The host resolves a stop by looking the child up in a resident-activation table and — **on a miss — returns silently**. The UI therefore reports "accepted", the button greys out, and the child keeps running, with nothing anywhere explaining it. This plugin wraps the shared cancel: it records what the host answered, asks again a moment later whether the child is still running, and if it is, re-interrupts through its own `/subagent-role-router/stop` endpoint using **both id spellings** (with and without the `session-` prefix) and **both authority shapes** (by parent session, by resident ancestor), reporting every attempt back to the UI. A refusal becomes a visible refusal instead of silence.
-
-The retry does not disturb work in flight: it sends the same interrupt again and reports honestly whether it took.
-
+- **[awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)** (the official DSH marketplace): entry `data/plugins/643048695__dsh-subagent-role-router.yml`, category `model`. Search for it under Settings → Plugins → Marketplace.
+- The marketplace reads `version` and `description` from the root `package.json` at the repository URL, so bumping the version here updates what the entry shows.
 
 ## Install
 
-Install from GitHub with the DSH plugin command:
+This plugin is **not published to the npm registry**; install it from the repository:
 
 ```sh
-dsh plugin --profile desktop add github:643048695/dsh-subagent-role-router
+dsh plugin add github:643048695/dsh-subagent-role-router
 ```
 
-For local development, install with `link:` and restart DSH Desktop after changing code:
+Local development install (`link:`, so code changes apply after reloading the client):
 
 ```sh
-dsh plugin --profile desktop add /path/to/dsh-subagent-role-router
+# install the checkout itself as a plugin (node_modules becomes a source symlink)
+dsh plugin add link:/path/to/dsh-subagent-role-router
 ```
 
-## Host version requirements
+With no configuration the behavior is identical to not having the plugin installed.
 
-All 9 `@deepseek-ai/*` peers are declared as:
+## Debug switches
 
+| Switch | Effect | Default |
+| --- | --- | --- |
+| `DSH_SUBAGENT_ROLE_ROUTER_LOG` | Point it at a **file path** and the stop fallback, `REJECT_NOT_LIVE` and `SET_OVERRIDE` append one timestamped line each. Unset, nothing is written anywhere. | unset |
+| `?srrLog=1` on the page URL | Enables the client debug channel (route picks, overrides, failover). | off |
+| `POST /subagent-router/debug` | Server-side debug endpoint; it only records anything when the log variable above is set, and says so in its `logged` field. | — |
+
+The client channel is off by default on purpose: it used to POST on **every selector render** — whoever is chasing a bug can still turn it on, but nobody else should pay that network cost.
+
+## HTTP endpoints
+
+The plugin registers the prefix route `/subagent-router` on the loopback DSH server (front end accesses it by document-relative path):
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /subagent-router/route?childId=` | The route currently in effect for one subagent (also the way to confirm which build the backend runs: `?childId=nothing`) |
+| `POST /subagent-router/select` | Set a model/effort override for one subagent (this is also how mid-run switching works) |
+| `POST /subagent-router/clear` | Clear one subagent's override |
+| `POST /subagent-router/stop` | Stop fallback: retry the interrupt with both id spellings and both authorization shapes |
+| `GET /subagent-router/events` | SSE change stream (route picks, overrides, failover, member routes), 25-second heartbeat |
+| `GET /subagent-router/activity` | Live snapshot of the subagents in the current conversation |
+| `GET /subagent-router/batch` | Data for the batch card (writable direct children + model pool) |
+| `POST /subagent-router/batch/select` | Set overrides in bulk |
+| `POST /subagent-router/batch/clear` | Clear overrides in bulk |
+| `GET /subagent-router/whitelist` | Current state of the native whitelist mirror |
+| `GET /subagent-router/exempt-candidates` | Candidate values for exemption rules (preset / cwd / name prefix) |
+| `POST /subagent-router/debug` | Debug record endpoint (see the switches above) |
+
+## Model-callable tools
+
+When enabled, the model can inspect and change subagent routing itself (implementation in `lib/router-tools.js`):
+
+| Tool | Purpose |
+| --- | --- |
+| `subagent_routes_inspect` | The actual route of every subagent in the current conversation, whether it is writable, the model pool and each model's declared efforts |
+| `subagent_routes_update` | Change models/efforts for one or many subagents or team members; effort-only (`keep_model`) and reset (`reset`); optional `expected_revisions` for optimistic concurrency |
+
+## Release / Publish
+
+This repository **does not publish to npm**. A release is a tagged commit:
+
+```sh
+npm test                                  # green before anything else
+# bump package.json "version" and CHANGELOG.md
+git add -A && git commit -m "chore: X.Y.Z"
+git tag -a vX.Y.Z -m "vX.Y.Z: <one-liner>"
+git push origin main && git push origin vX.Y.Z
 ```
->=0.1.7-rc.1 <0.2.0-0 || >=0.2.0-rc.1 <0.2.1-0 || >=0.2.1-rc.1 <0.3.0-0
-```
 
-That is the **0.1.7 line + the 0.2.0 line + the 0.2.1 line**, with nothing declared for `0.3.0` and up. **The host version verified today is DSH `0.2.1-rc.3`** (the core bundled with the current desktop build, re-checked 2026-10-29).
+The marketplace entry reads `version` from the root `package.json` at the repository URL, so the version number is the marketplace version; the description text lives in `data/plugins/643048695__dsh-subagent-role-router.yml`, which is updated by a PR to [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin). Full flow in [`RELEASING.md`](RELEASING.md).
 
-To understand why the range looks like this, you need to know **how DSH validates** it. `@deepseek-ai/dsh-app-boot` runs, for every `@deepseek-ai/dsh` / `dsh-*` peer:
+## Host version requirement
+
+All eight `@deepseek-ai/*` peers are declared as **`>=0.1.7-rc.1 <0.3.0-0`**: the 0.1.7 line and the **entire 0.2.x line** (prereleases and stable releases alike) are supported; 0.3.0 and later are not declared.
+
+To see why the range has this shape, look at how DSH **validates** it. For every `@deepseek-ai/dsh` / `dsh-*` peer, `@deepseek-ai/dsh-app-boot` runs:
 
 ```js
 semver.satisfies(runtimeVersion, range, { includePrerelease: true })
 ```
 
-`includePrerelease: true` **disables semver's prerelease tuple rule** — a prerelease is no longer rejected for lacking a same-tuple carrier, and is instead compared by normal ordering. Two consequences are counter-intuitive:
+`includePrerelease: true` **disables semver's prerelease-tuple rule** — a prerelease is no longer rejected for lacking a same-tuple carrier; it is compared by the ordinary ordering. Both consequences are counter-intuitive:
 
-| Upper bound | `0.2.1-rc.2` | `0.2.1` (stable) | Note |
+| Ceiling | `0.2.0-rc.1` | `0.2.0` (stable) | Note |
 | --- | --- | --- | --- |
-| `<0.2.1` | ✅ admitted | ❌ **rejected** | The worst combination: prereleases install, and the stable release pulls the bundle out |
-| `<0.3.0` | ✅ | ✅ | But it also admits `0.3.0-rc.1`, beyond the verified range |
-| **`<0.3.0-0`** | ✅ | ✅ | Recommended: all of 0.2.x admitted, `0.3.0-rc.1` still blocked |
+| `<0.2.0` | ✅ admitted | ❌ **rejected** | The worst split: prereleases install, and the stable release strips the bundle |
+| `<0.3.0` | ✅ | ✅ | But also admits `0.3.0-rc.1`, beyond the verified range |
+| **`<0.3.0-0`** | ✅ | ✅ | Recommended: all of 0.2.x, and `0.3.0-rc.1` is refused |
 
-A wrong upper bound does **not** degrade gracefully: `loadProfileDirectory()` throws on an incompatible bundle, the bundle lands in `skippedBundles`, and startup writes `skipping profile bundle "dsh-subagent-role-router"` to stderr — the plugin and its settings card **both disappear**.
+A wrong ceiling does not degrade gracefully: `loadProfileDirectory()` throws for an incompatible bundle, which lands in `skippedBundles` and prints `skipping profile bundle "dsh-subagent-role-router"` to stderr at startup — the plugin and its settings card both disappear.
 
-**Why three branches instead of one `>=0.1.7-rc.1 <0.3.0-0`?** Because npm resolves peers **without** `includePrerelease`, and semver's default rule requires a prerelease to be caught explicitly by a comparator from the **same tuple** (`0.2.1-rc.x` belongs to the `0.2.1` tuple). A single wide range silently misses prerelease hosts such as `0.2.0-rc.1` and `0.2.1-rc.2` — the plugin would still load, but `npm install` reports `ERESOLVE`. Split into branches, the host check (lenient) and npm resolution (strict) **both pass**:
-
-| Host version | Host `includePrerelease:true` | npm default strict mode |
-| --- | --- | --- |
-| `0.1.7-rc.2` | ✅ | ✅ |
-| `0.2.0-rc.1` | ✅ | ✅ |
-| `0.2.1-rc.2` | ✅ | ✅ |
-| `0.2.1-rc.3` | ✅ | ✅ |
-| `0.2.5` / `0.2.1` | ✅ | ✅ |
-| `0.3.0-rc.1` | ❌ blocked | ❌ blocked |
+`plugin/test/peer-range.test.mjs` is the regression guard for this contract: it calls the host's own `semver.satisfies(..., { includePrerelease: true })` and asserts each row of the table above.
 
 ## Configuration
 
-Prefer the Web settings card (**Settings → Plugins → dsh-subagent-role-router**).
+Use the Web settings card (**Settings → Plugins → Subagent default model (dsh-subagent-role-router)**).
 
-You can also edit the profile's patch file `~/.dsh/profiles/<profile>/cordis.patch.yml` directly. Since DSH 0.1.7 settings live there, under this plugin's Loader entry id `dsh-subagent-role-router`:
+You can also edit the profile patch `~/.dsh/profiles/<profile>/cordis.patch.yml` directly: since DSH 0.1.7 that is where settings live, keyed by this plugin's Loader entry id `dsh-subagent-role-router`:
 
 ```yaml
 - id: dsh-subagent-role-router
@@ -265,118 +263,133 @@ You can also edit the profile's patch file `~/.dsh/profiles/<profile>/cordis.pat
     provider: deepseek-official
     model: deepseek-v4-pro
 
-    # Or multiple models: capability 2 (distribution) + capability 3 (cross-provider failover)
+    # Or multiple models: Capability 1 (distribution) + Capability 2 (cross-provider failover)
+    provider: deepseek-official
     models:
       - model: deepseek-v4-pro
         reasoningEffort: high
-      - provider: other-provider     # a model from another provider
+      - provider: other-provider     # a model from another vendor
         model: gpt-5.6
         reasoningEffort: max
-    strategy: round-robin      # round-robin | random
-    failoverEnabled: true      # switch providers on connection-class failures
-    injectRouteContext: true   # write the current provider/model into subagent context (default on)
-
-    # Capability 1: per-role routing
-    roleMode: true
-    exploreProvider: magpie
-    exploreModel: antigravity/gemini-3.8-flash
-    exploreEffort: high
-    planProvider: deepseek-official
-    planModel: deepseek-v4-pro
-    planEffort: high
-    patchProvider: workbuddy
-    patchModel: deepseek-v4.1-flash
-    patchEffort: high
-
-    # Capability 6: role candidate pools (optional). When *Models is present it
-    # wins; the triple above is then treated as a one-row pool.
-    # Array length = how many subagents this role may run at once.
-    patchModels:
-      - provider: workbuddy
-        model: deepseek-v4.1-flash
-        reasoningEffort: high
-      - provider: magpie
-        model: sensenova/kimi-k3
-      - provider: magpie
-        model: workbuddy/mimo-v2.6-pro
-    roleSlotCooldownSeconds: 15   # seconds a failed candidate is skipped; 0 disables
-
-    # Capability 5: fork active-window slicing
-    forkWindowSlicing: true    # default on
-    forkWindowTurns: 3         # keep the most recent N turns (1-20)
+    strategy: round-robin  # round-robin (sequential) | random
+    failoverEnabled: true  # switch across providers on connection failures
+    injectRouteContext: true  # write the live provider/model into each subagent’s context (default)
 ```
 
-### Configuration fields
+Role candidate pools (capability 4) — one array per role, and **the array length is that role's concurrency**:
+
+```yaml
+    roleMode: true
+    # Explore role: 2 lanes
+    exploreModels:
+      - provider: magpie
+        model: antigravity/gemini-3.8-flash
+        reasoningEffort: high
+      - provider: magpie
+        model: workbuddy/mimo-v2.6-pro
+    # Plan role: 1 lane
+    planModels:
+      - provider: magpie
+        model: workbuddy-ai/deepseek-v4.1-flash
+        reasoningEffort: max
+    # General/patch role: 3 lanes
+    patchModels:
+      - provider: magpie
+        model: antigravity/gemini-3.8-flash
+        reasoningEffort: high
+      - provider: magpie
+        model: workbuddy/mimo-v2.6-pro
+      - provider: magpie
+        model: sensenova/kimi-k3
+    roleSlotCooldownSeconds: 15  # seconds a failed candidate is skipped; 0 disables
+```
+
+An entry may be a `provider/model` string or the object form above; `reasoningEffort` is optional (omitted means the target model's own default effort). An empty or absent array **falls back to the legacy single-value fields** (`exploreProvider`/`exploreModel`/`exploreEffort`, …), so upgrading from an older version needs no config change.
+
+> **Upgrading from 0.1.6 or earlier**: the old configuration lived in the `subagent-default-model` section of `~/.dsh/settings.yaml`. 0.1.7 imports that file **once** and renames it to `settings.yaml.imported`, never reading it again. The import uses each section name verbatim as an entry id, while this plugin's entry id is `dsh-subagent-role-router` — so the old section is **not** imported (the host logs `section subagent-default-model … was not imported into entry dsh-subagent-role-router`) and the old values survive only in the renamed file. Move them into the `config:` block above by hand.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `provider` | string | `""` | Provider for the single-model form. |
-| `model` | string | `""` | Single model id (backward compatible). |
-| `reasoningEffort` | string | `""` | Reasoning effort for the single-model form. |
-| `models` | array | `[]` | Multi-model list (strings or `{provider, model, reasoningEffort?}` pairs). Capabilities 2 and 3 only matter with ≥2 entries. |
-| `strategy` | string | `round-robin` | Capability 2 distribution strategy: `round-robin` or `random`. |
-| `failoverEnabled` | boolean | `true` | Capability 3: switch models **across providers** within `models` on connection-class failures. |
-| `injectRouteContext` | boolean | `true` | Capability 4 channel two: inject one "current provider/model" line into the subagent's **own context**. |
-| `roleMode` | boolean | `false` | Capability 1: enable per-role routing. |
-| `exploreProvider` / `exploreModel` / `exploreEffort` | string | `""` | Explore role route; falls back to `models` when `exploreModel` is empty. |
-| `planProvider` / `planModel` / `planEffort` | string | `""` | Plan role route; same fallback. |
-| `patchProvider` / `patchModel` / `patchEffort` | string | `""` | Patch role route; same fallback. |
-| `exploreModels` / `planModels` / `patchModels` | array | `[]` | Capability 6: this role's candidate pool. Each entry is a string or `{provider, model, reasoningEffort?}`; **the array length is how many subagents the role may run concurrently**. When non-empty it takes precedence over the triple above. |
-| `roleSlotCooldownSeconds` | number | `15` | Capability 6: seconds a failed candidate is skipped by new delegations; `0` disables the pause so failures only fall through to the next candidate. |
-| `forkWindowSlicing` | boolean | `true` | Capability 5: enable fork active-window slicing. |
-| `forkWindowTurns` | number | `3` | Capability 5: number of recent turns to retain (1-20). |
-| `showChatModelNotice` | boolean | `false` | Show the model-change notice row in the conversation view. |
-
-> **Every field needs a default**: DSH's settings UI is built by `projectForm()`, which **drops** any field whose resolved value is `undefined`. A `z.string()` with no default effectively does not exist in the UI, and saving then reports the misleading `notApplied:ready:writable=true`.
-
-### Debug logging (off by default)
-
-The plugin writes **no log file** and appends to no path unless you ask it to:
-
-| Switch | Effect |
-| --- | --- |
-| env `DSH_SUBAGENT_ROLE_ROUTER_LOG` | When set to a file path, the backend appends stop/override diagnostics there. Unset, every call is a no-op. |
-| `?srrLog=1` on the page URL, or the same key in `localStorage` | Enables the client picker's debug channel. Unset, no debug request is sent. |
-
-> Earlier versions **hardcoded** the log path in the source. That cannot be written on anyone else's machine and leaks the local user name, so it is now the opt-in switch above; `test/no-hardcoded-paths.test.mjs` keeps it from coming back.
+| `provider` | string | — | Provider for string-type model entries. |
+| `model` | string | — | Single model id (backward compatible). |
+| `models` | array | `[]` | List of model entries (string or `{provider, model, reasoningEffort?}` pair). Only meaningful for Capabilities 1 and 2 with 2+ entries. |
+| `strategy` | string | `round-robin` | Capability 1's distribution strategy: `round-robin` (sequential) or `random`. |
+| `failoverEnabled` | boolean | `true` | Capability 2: switch models **across providers** inside the `models` list when a subagent hits a connection failure (subagents only). |
+| `injectRouteContext` | boolean | `true` | Capability 3 channel 2: inject a real one-line prompt stating the live provider/model into each subagent’s **own context** (subagents only). |
+| `reasoningEffort` | string | — | Optional reasoning strength for a model entry (e.g. `high`, `max`). |
+| `roleMode` | boolean | `false` | Capability 4: route by delegation role (explore / plan / patch) instead of one shared `models` list. |
+| `exploreModels` / `planModels` / `patchModels` | array | `[]` | Capability 4 candidate queue per role. **Length = how many subagents of that role may run at once**; entries are strings or `{provider, model, reasoningEffort?}`. Empty falls back to the legacy `exploreProvider`/`exploreModel`/`exploreEffort` triple. |
+| `roleSlotCooldownSeconds` | number | `15` | Capability 4: how long a candidate that failed is skipped for new delegations. `0` disables the cooldown. |
 
 ## Platform support
 
-**Windows, macOS and Linux are all supported**, with no platform-specific configuration: no process is spawned and `process.platform` is never consulted.
+**Windows, macOS, and Linux are all supported**, and no platform-specific configuration is needed. The plugin's runtime code is **pure JavaScript**: `lib/index.js` (host half) and `lib/client.js` (client half) never touch the filesystem, join paths, spawn processes, or branch on `process.platform` — they only consume services and events the DSH host exposes, so platform differences are owned entirely by the host.
 
-The one place that touches the filesystem is the capability 8 cache of observed birth identities — a single JSON file at `~/.dsh/subagent-role-router-candidates.json`, built from `USERPROFILE || HOME`. A failed write is **ignored silently** (it only feeds the dropdown's candidates, never routing itself). Tests point it elsewhere with `setBirthSeenPath()`, so they never touch your `~/.dsh`.
+Platform-relevant surfaces that were checked and are now continuously verified:
 
-## Tests
+- **Config path**: the profile patch lives at `.dsh/profiles/<profile>/cordis.patch.yml` under the user's home directory. On Windows that is `%USERPROFILE%\.dsh\profiles\<profile>\cordis.patch.yml` (typically `C:\Users\<you>\.dsh\...`), the same convention as `~/.dsh/...` on macOS/Linux.
+- **Dependency tree**: `package-lock.json` locks all three Windows optional native builds (`win32-x64-msvc`, `win32-arm64-msvc`, `win32-ia32-msvc`), and npm installs only the one matching the current platform. This plugin's direct dependency `@deepseek-ai/schemastery` is pure JS.
+- **Line endings**: the repo does not pin `core.autocrlf`, so a Windows checkout may produce CRLF sources. The full suite was verified in that shape — assertions that parse source text match on substrings, never on line terminators, so CRLF vs LF does not change the result.
+- **Path derivation**: repository scripts use `fileURLToPath`, never `URL.pathname`. The latter yields `/C:/...` on Windows, which `path.join` folds into the non-existent `\C:\...` — a hard failure that only ever appears on Windows.
+- **Test discovery**: `npm test` invokes `node --test` with no glob, letting the Node test runner discover cases itself rather than depending on shell expansion — a glob like `test/*.test.mjs` expands under POSIX sh but is passed through literally by cmd/PowerShell.
 
-```sh
-npm install
-npm test
+CI runs the same suite on `ubuntu-latest`, `windows-latest`, and `macos-latest`, so these guarantees are continuously verified rather than asserted once.
+
+## Subagent connection-failure failover
+
+With `failoverEnabled` on (the default), when a subagent's own loop hits a connection-class failure, the plugin automatically switches models inside the `models` list and retries, following `strategy`. See [Capability 2](#capability-2--cross-provider-failover-if-one-provider-is-down-run-on-another-providers-model) above for the full account; the key points:
+
+- **Cross-provider** — candidates are the whole `models` list, so it can fail over to a model from another provider, not just another model ID from the same vendor.
+- **Trigger codes** — connection-class: `RATE_LIMIT`, `QUOTA`, `SERVER`, `TIMEOUT`, `TRANSPORT`, `EMPTY_RESPONSE`; auth-class: `AUTH`, `INVALID_CREDENTIAL` (invalid/expired key — switches, with a warning). Other codes do not switch.
+- `round-robin`: advance to the next model in the list (the queue).
+- `random`: pick any model (without checking whether it was used before).
+- **Needs ≥ 2 models** — with fewer than 2 entries in `models`, the feature is inactive.
+- **Exhaustion passes through** — once every pool entry has been tried and failed, the real error is let through; no infinite retries.
+- **Inherited `reasoningEffort` is dropped on switch** — the new provider/model is requested at the default reasoning strength instead of forcing the primary's strength onto a provider that may not support it.
+- **Sticky within a run** — subsequent steps of the same subagent run stay on the switched model.
+
+It builds on the official `agent/request-error` + `agent/request` waterfalls and applies **only to subagents** — the main agent loop is never switched.
+
+## Route visibility
+
+Capability 3 has **two independent channels**. See [Capability 3](#capability-3--route-visibility-you-can-see-it-and-so-can-the-subagent) above for the full account:
+
+### Channel 1: UI rows (for the user)
+
+| View | What it shows | Source frame |
+| --- | --- | --- |
+| Trajectory | A row "Current provider/model: `provider/model`" | official `request/context` |
+| Conversation | One of "Current provider/model" / "Switched to" / "Resumed on" | official `request/header` (by `reason`: `initial` / `change` / `resume`) |
+
+Both registrations live inside `ctx.effect`, and the node `kind` values are plugin-owned (`trajectory-subagent-model` for the trajectory, `chat-subagent-model-notice` for the conversation) rather than reusing the Host's built-in `context` kind — the latter is filtered out by the Host's visibility rules.
+
+### Channel 2: Prompt injection (for the subagent)
+
+See the full description and sample text above. Implementation:
+
+| Aspect | Behaviour |
+| --- | --- |
+| Value source | the `{provider, model}` returned by the `agent/request` waterfall **after** it settles (including a failover swap) |
+| Injection point | the following `agent/pre-step`, where that step's message list is still mutable |
+| Dedupe | an unchanged route injects nothing; a changed route replaces the stale line |
+| Scope | `origin === "subagent"` only; the main agent is never touched |
+| Setting | `injectRouteContext`, on by default |
+| Message source | `plugin:dsh-subagent-role-router` + `form: "route-context"` (the v4 session format requires a producer-owned `source.kind`) |
+
+> **The two channels do not replace each other**: UI rows never enter the model's context, and the prompt injection never appears in your UI.
+
+## How it works
+
+```text
+Explicit agentOptions on the request
+  → subagent-default-model settings
+  → inherit parent session route
 ```
 
-**102 cases**, in eleven groups:
-
-- `test/fork-window.test.mjs` — window slicing mapping and safe fallback, validating seed contiguity against the real DSH `Session`.
-- `test/router-audit.test.mjs` — role detection, explicit override preservation, round-robin once per child, team exemption, unload restoration, main session unaffected, **a 0.2.x-shaped fork backend (only `prepareContinuable`, no `start`) still gets sliced**, and the capability 6 pool behavior: single-candidate equivalence, spillover when busy, `2/1/1` for 3 candidates with 4 concurrent tasks, lane hand-back, failure cooldown, zero cooldown, a fully cooled pool still serving, explicit models taking no lane, in-pool failover, and "unusable candidate" detection with its false-positive boundary.
-- `test/client-audit.test.mjs` — settings-card form validation, `forkWindowTurns` bounds and serialization, notice toggle sync, subscription and timer cleanup, plus the pool's form invariants (pool beats the triple, blank rows dropped, half-filled rows blocked, cooldown `0` preserved, legacy fields mirrored, fingerprint round-trip).
-- `test/schema-pool.test.mjs` — the settings schema layer: pool field defaults, **a candidate entry without `reasoningEffort` is still accepted**, cooldown `0` survives, the legacy single-value fields still parse, and the pool beats the legacy triple.
-- `test/live-route.test.mjs` — capability 7: a mid-run switch applies to the next request only, overrides are isolated per child, inherited effort is dropped, `agent/disposed` cleans up, the main session is untouched.
-- `test/exempt-rules.test.mjs` — capability 8: the three match dimensions, a full exemption injecting nothing, a pinned birth model, the candidate cache and its eviction, version-suffix stripping.
-- `test/team-model.test.mjs` — agent-teams member model semantics and the automatic-failover exemption boundary.
-- `test/whitelist-sync.test.mjs` — capability 9: whitelist derivation, idempotent comparison, unique-match repair of half-specified model names, hands-off when the match is not unique, warn-only on failure.
-- `test/real-directory.test.mjs` — model-directory reading against an extraction of a real install; `skip`s when it cannot reach one.
-- `test/stop.test.mjs` — capability 10: the first id spelling is accepted, a throw on one spelling does not stop the sweep, a child with nothing to stop it reports why, and the resident-ancestor authority path is reached.
-
-- `test/no-hardcoded-paths.test.mjs` — the desensitization gate: no source, test or tool file may contain a local absolute path (user home, DSH Desktop install dir), with a self-check that the scan is not vacuous and that trace output stays env-gated.
-
-> `fork-window.test.mjs` needs a **real** `@deepseek-ai/dsh-session`. `tools/dsh-session-resolver.mjs` looks in order: the `DSH_SESSION_PATH` environment variable → the `node_modules` dependency (hit right after `npm install`) → `~/.dsh/profiles/*/node_modules` → the platform DSH Desktop install directory.
->
-> **When it cannot be found, that group `skip`s instead of failing** — not reaching the object under test is not the same as the code being wrong, and reporting it red only trains people to ignore red output. Set `DSH_SESSION_PATH` to pin an explicit path.
+The plugin wraps the host `ctx.subagents` service (`start` / `startContinuable`), so it covers every delegation path — built-in `subagent` / `subagent_fork` tools and any custom tool that calls the service without providing `agentOptions`.
 
 ## License
 
-Released under the [MIT License](LICENSE).
+This project is open-sourced under the [MIT License](LICENSE), copyright (c) 2026 LaoDing.
 
-- Original work: **Copyright (c) 2026 LaoDing** ([dingminhua/dsh-subagent-default-model](https://github.com/dingminhua/dsh-subagent-default-model))
-- Modifications: **Copyright (c) 2026 643048695**
-
-The MIT License grants anyone the right to deal in this software without restriction, including the rights to use, copy, modify, merge, publish, distribute, sublicense and sell copies, provided the above copyright notice and this permission notice are included in all copies or substantial portions. The software is provided "as is", without warranty of any kind. See [LICENSE](LICENSE) for the full text.
+The MIT License grants anyone the freedom to deal in the Software without restriction, including using, copying, modifying, merging, publishing, distributing, sublicensing, and/or selling copies, provided that all copies or substantial portions retain the above copyright notice and this permission notice; the Software is provided "AS IS", without warranty of any kind. See [LICENSE](LICENSE) for the full text.

@@ -109,8 +109,8 @@ function harness(settings = config) {
   }
 
   async function call({ method = 'POST', path, body, remote = '127.0.0.1', contentType = 'application/json' }) {
-    const route = routes.find((entry) => entry.path === '/subagent-role-router');
-    assert.ok(route, 'the plugin must claim /subagent-role-router');
+    const route = routes.find((entry) => entry.path === '/subagent-router');
+    assert.ok(route, 'the plugin must claim /subagent-router');
     const payload = body === undefined ? '' : JSON.stringify(body);
     const req = {
       method,
@@ -270,13 +270,13 @@ test('the override endpoint accepts an agent-teams member and re-routes it', asy
   const h = harness();
   const member = h.liveChild('m4', { label: 'agent-teams: worker' });
 
-  const read = await h.call({ method: 'GET', path: '/subagent-role-router/route?childId=m4' });
+  const read = await h.call({ method: 'GET', path: '/subagent-router/route?childId=m4' });
   assert.equal(read.status, 200);
   assert.equal(read.body.ok, true, 'a team member is a live child for the override');
   assert.equal(read.body.value.model, 'a');
 
   const selected = await h.call({
-    path: '/subagent-role-router/select',
+    path: '/subagent-router/select',
     body: { childId: 'm4', provider: 'q', model: 'b', reasoningEffort: 'high' }
   });
   assert.equal(selected.status, 200);

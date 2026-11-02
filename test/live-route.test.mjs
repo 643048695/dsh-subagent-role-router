@@ -104,8 +104,8 @@ function harness(settings = config) {
 
   /** Drive the plugin's own HTTP route. */
   async function call({ method = 'POST', path, body, remote = '127.0.0.1', contentType = 'application/json' }) {
-    const route = routes.find((entry) => entry.path === '/subagent-role-router');
-    assert.ok(route, 'the plugin must claim /subagent-role-router');
+    const route = routes.find((entry) => entry.path === '/subagent-router');
+    assert.ok(route, 'the plugin must claim /subagent-router');
     const payload = body === undefined ? '' : JSON.stringify(body);
     const req = {
       method,
@@ -171,7 +171,7 @@ test('an override picked in the UI wins over the failover swap', async () => {
   assert.equal(before.model, 'a', 'without an override the pool decides');
 
   const selected = await h.call({
-    path: '/subagent-role-router/select',
+    path: '/subagent-router/select',
     body: { childId: 'child-1', provider: 'q', model: 'b', reasoningEffort: 'low' }
   });
   assert.equal(selected.status, 200);
@@ -192,7 +192,7 @@ test('an override applies to its own child only', async () => {
   const h = harness();
   const one = h.liveChild('child-1');
   const two = h.liveChild('child-2');
-  await h.call({ path: '/subagent-role-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
+  await h.call({ path: '/subagent-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
 
   const seeded = { provider: 'p', model: 'a' };
   assert.equal((await h.request(childPayload(one), seeded)).model, 'b');
@@ -203,7 +203,7 @@ test('an override applies to its own child only', async () => {
 test('an override with no effort drops the inherited one instead of leaking it', async () => {
   const h = harness();
   const child = h.liveChild('child-1');
-  await h.call({ path: '/subagent-role-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
+  await h.call({ path: '/subagent-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
 
   // A provider whose thinking level must agree with the effort rejects a
   // mismatched pair, so inheriting `max` from the route being left would break
@@ -223,7 +223,7 @@ test('failover stays out of the way while an override is live', async () => {
   const retried = await h.error(child, { code: 'TIMEOUT', message: 'slow' }, { kind: 'continue' });
   assert.deepEqual(retried, { kind: 'retry' });
 
-  await h.call({ path: '/subagent-role-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
+  await h.call({ path: '/subagent-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
 
   // With an override live the user has named the model, so an automatic swap
   // would silently overrule that pick. The failure must surface instead, and no
@@ -237,15 +237,15 @@ test('failover stays out of the way while an override is live', async () => {
 test('reset and disposal forget the override', async () => {
   const h = harness();
   const child = h.liveChild('child-1');
-  await h.call({ path: '/subagent-role-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
+  await h.call({ path: '/subagent-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
   assert.equal((await h.request(childPayload(child), { provider: 'p', model: 'a' })).model, 'b');
 
-  const cleared = await h.call({ path: '/subagent-role-router/clear', body: { childId: 'child-1' } });
+  const cleared = await h.call({ path: '/subagent-router/clear', body: { childId: 'child-1' } });
   assert.equal(cleared.body.ok, true);
   assert.equal(cleared.body.value.override, null);
   assert.equal((await h.request(childPayload(child), { provider: 'p', model: 'a' })).model, 'a');
 
-  await h.call({ path: '/subagent-role-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
+  await h.call({ path: '/subagent-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
   h.emit('agent/disposed', { agent: child });
   assert.equal((await h.request(childPayload(child), { provider: 'p', model: 'a' })).model, 'a');
   h.dispose();
@@ -259,15 +259,15 @@ test('the route reports the live pair and the pending override separately', asyn
   // reporting "high" below can only come from the request header.
   assert.equal(child.session.requestContext().reasoningEffort, undefined);
 
-  const initial = await h.call({ method: 'GET', path: '/subagent-role-router/route?childId=child-1', body: undefined });
+  const initial = await h.call({ method: 'GET', path: '/subagent-router/route?childId=child-1', body: undefined });
   assert.equal(initial.body.ok, true);
   assert.equal(initial.body.value.provider, 'p');
   assert.equal(initial.body.value.model, 'general');
   assert.equal(initial.body.value.reasoningEffort, 'high');
   assert.equal(initial.body.value.override, null);
 
-  await h.call({ path: '/subagent-role-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
-  const pending = await h.call({ method: 'GET', path: '/subagent-role-router/route?childId=child-1', body: undefined });
+  await h.call({ path: '/subagent-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
+  const pending = await h.call({ method: 'GET', path: '/subagent-router/route?childId=child-1', body: undefined });
   // The child is idle, so `requestContext()` still reports the OLD route while
   // the override describes where it will go next. The UI shows both.
   assert.equal(pending.body.value.model, 'general');
@@ -277,14 +277,14 @@ test('the route reports the live pair and the pending override separately', asyn
 
 test('an unknown or finished child is refused instead of silently accepted', async () => {
   const h = harness();
-  const missing = await h.call({ path: '/subagent-role-router/select', body: { childId: 'nope', provider: 'q', model: 'b' } });
+  const missing = await h.call({ path: '/subagent-router/select', body: { childId: 'nope', provider: 'q', model: 'b' } });
   assert.equal(missing.body.ok, false);
   assert.equal(missing.body.error.code, 'not-live');
 
   // A main-agent session must not be reachable through this route: the whole
   // point is that it only ever touches subagent children.
   h.agents.set('main-1', { id: 'main-1', session: { header: {}, requestContext: () => ({}) } });
-  const main = await h.call({ path: '/subagent-role-router/select', body: { childId: 'main-1', provider: 'q', model: 'b' } });
+  const main = await h.call({ path: '/subagent-router/select', body: { childId: 'main-1', provider: 'q', model: 'b' } });
   assert.equal(main.body.ok, false);
   assert.equal(main.body.error.code, 'not-live');
   h.dispose();
@@ -294,19 +294,19 @@ test('the endpoint is loopback-only and refuses non-JSON posts', async () => {
   const h = harness();
   h.liveChild('child-1');
 
-  const remote = await h.call({ path: '/subagent-role-router/select', remote: '192.168.1.20', body: { childId: 'child-1', provider: 'q', model: 'b' } });
+  const remote = await h.call({ path: '/subagent-router/select', remote: '192.168.1.20', body: { childId: 'child-1', provider: 'q', model: 'b' } });
   assert.equal(remote.status, 403);
   assert.equal(remote.body.error.code, 'forbidden');
 
   // A cross-site form cannot send application/json without a CORS preflight, so
   // requiring it doubles as CSRF hardening.
-  const form = await h.call({ path: '/subagent-role-router/select', contentType: 'text/plain', body: { childId: 'child-1', provider: 'q', model: 'b' } });
+  const form = await h.call({ path: '/subagent-router/select', contentType: 'text/plain', body: { childId: 'child-1', provider: 'q', model: 'b' } });
   assert.equal(form.status, 415);
 
-  const empty = await h.call({ path: '/subagent-role-router/select', body: { childId: 'child-1', provider: '', model: '' } });
+  const empty = await h.call({ path: '/subagent-router/select', body: { childId: 'child-1', provider: '', model: '' } });
   assert.equal(empty.status, 400);
 
-  const unknown = await h.call({ path: '/subagent-role-router/nope', body: {} });
+  const unknown = await h.call({ path: '/subagent-router/nope', body: {} });
   assert.equal(unknown.status, 404);
   h.dispose();
 });
