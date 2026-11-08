@@ -108,7 +108,7 @@ function harness(settings = config) {
   }
 
   /** Register a live child the way the host would. */
-  function liveChild(id, { label = id, route = { provider: 'p', model: 'a' } } = {}) {
+  function liveChild(id, { label = id, route = { provider: 'p', model: 'a' }, select = false } = {}) {
     const agent = {
       id,
       session: {
@@ -118,6 +118,12 @@ function harness(settings = config) {
       },
       options: { provider: 'parent', model: 'parent' }
     };
+    if (select) {
+      // The host's front door (`model.select`), recorded so tests can assert
+      // exactly which selection was pushed onto the child.
+      const selects = [];
+      agent.model = { selects, select(selection) { selects.push({ ...selection }); } };
+    }
     agents.set(id, agent);
     return agent;
   }
@@ -198,7 +204,7 @@ test('preset and cwd rules match their own identity field', () => {
 test('an exempt child never enters the automatic failover', async () => {
   const h = harness();
   const exemptChild = h.liveChild('exempt-1', { label: 'egm-goldfish-logic' });
-  const plainChild = h.liveChild('plain-1', { label: 'researcher' });
+  const plainChild = h.liveChild('plain-1', { label: 'researcher', select: true });
   const failure = { code: 'RATE_LIMIT', message: 'boom' };
   // The exempt child's failure is passed through untouched — no retry verdict.
   const out = await h.error(exemptChild, failure, 'passthrough');
@@ -207,16 +213,17 @@ test('an exempt child never enters the automatic failover', async () => {
   const seed = { provider: 'p', model: 'a', reasoningEffort: 'high', maxTokens: 5 };
   const untouched = await h.request(exemptChild, seed);
   assert.equal(untouched, seed);
-  // The plain child still fails over: error asks for a retry, and the rebuilt
-  // request is swapped to the second pool entry (the inherited effort is
-  // dropped because it belongs to the route that just failed).
+  // The plain child still fails over: error asks for a retry, and the target
+  // for the NEXT step is selected through the front door the moment the
+  // failure is seen — the pool's second entry, without the failed route's
+  // inherited strength. The rebuilt request itself is never rewritten (the
+  // host freezes the selection and throws on a differing proposal).
   const verdict = await h.error(plainChild, failure, undefined);
   assert.deepEqual(verdict, { kind: 'retry' });
+  assert.deepEqual(plainChild.model.selects, [{ provider: 'q', model: 'b' }]);
   const switched = await h.request(plainChild, seed);
-  assert.equal(switched.provider, 'q');
-  assert.equal(switched.model, 'b');
-  assert.equal(switched.maxTokens, 5);
-  assert.equal(switched.reasoningEffort, undefined);
+  assert.equal(switched, seed);
+  assert.equal(plainChild.model.selects.length, 2, 'the target is re-picked while the seed lags');
   h.dispose();
 });
 
@@ -251,11 +258,11 @@ test('observed birth identities feed the point-and-pick candidates', async () =>
   // The preset suggestion is version-less so the rule survives plugin upgrades.
   assert.ok(suggestions.some((item) => item.kind === 'preset' && item.value === 'egm-goldfish'));
   // The candidates endpoint serves the same list, loopback-only like its siblings.
-  const route = h.routes.find((entry) => entry.path === '/subagent-router');
-  assert.ok(route, 'the plugin must claim /subagent-router');
+  const route = h.routes.find((entry) => entry.path === '/subagent-role-router');
+  assert.ok(route, 'the plugin must claim /subagent-role-router');
   const req = {
     method: 'GET',
-    url: '/subagent-router/exempt-candidates',
+    url: '/subagent-role-router/exempt-candidates',
     headers: {},
     socket: { remoteAddress: '127.0.0.1' },
     on() { return req; },

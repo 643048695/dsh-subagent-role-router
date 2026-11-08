@@ -110,6 +110,13 @@ function harness(options = {}) {
   const infoCalls = [];
   const agents = new Map();
   for (const [id, route, label, status] of options.live ?? []) agents.set(id, liveChild(id, route, label, status));
+  // Children named here get the host's front door (`model.select`), the way a
+  // real loop agent has one; disk stubs and older hosts do not.
+  for (const id of options.selectable ?? []) {
+    const agent = agents.get(id);
+    const selects = [];
+    agent.model = { selects, select(selection) { selects.push({ ...selection }); } };
+  }
   for (const id of options.mains ?? []) agents.set(id, mainAgent(id));
   const children = options.children ?? [];
   const listChildren = options.listChildren ?? (async (parentSessionId) => {
@@ -180,8 +187,8 @@ function harness(options = {}) {
 
   /** Drive the plugin's own HTTP route the way the web server would. */
   async function call({ method = 'GET', path, body, remote = '127.0.0.1', contentType = 'application/json' }) {
-    const route = routes.find((entry) => entry.path === '/subagent-router');
-    assert.ok(route, 'the plugin must claim /subagent-router');
+    const route = routes.find((entry) => entry.path === '/subagent-role-router');
+    assert.ok(route, 'the plugin must claim /subagent-role-router');
     const payload = body === undefined ? '' : JSON.stringify(body);
     const req = {
       method,
@@ -204,9 +211,9 @@ function harness(options = {}) {
     return captured;
   }
 
-  const batch = (parentSessionId) => call({ path: `/subagent-router/batch?parentSessionId=${encodeURIComponent(parentSessionId)}` });
-  const select = (parentSessionId, selections) => call({ method: 'POST', path: '/subagent-router/batch/select', body: { parentSessionId, selections } });
-  const clear = (parentSessionId, childIds) => call({ method: 'POST', path: '/subagent-router/batch/clear', body: { parentSessionId, childIds } });
+  const batch = (parentSessionId) => call({ path: `/subagent-role-router/batch?parentSessionId=${encodeURIComponent(parentSessionId)}` });
+  const select = (parentSessionId, selections) => call({ method: 'POST', path: '/subagent-role-router/batch/select', body: { parentSessionId, selections } });
+  const clear = (parentSessionId, childIds) => call({ method: 'POST', path: '/subagent-role-router/batch/clear', body: { parentSessionId, childIds } });
 
   /** Run the `agent/request` waterfall exactly the way the host does. */
   async function request(payload, value) {
@@ -378,7 +385,7 @@ test('a catalog that throws is reported, not translated into an empty list', asy
 
 test('a missing parent session id is a bad request, on read and on write', async () => {
   const h = harness({ children: [] });
-  const read = await h.call({ path: '/subagent-router/batch' });
+  const read = await h.call({ path: '/subagent-role-router/batch' });
   assert.equal(read.status, 400);
   assert.equal(read.body.error.code, 'bad-request');
   const write = await h.select('   ', [{ childId: 'abc', provider: 'p', model: 'a' }]);
@@ -449,7 +456,7 @@ test('strictChildrenOf normalises parent session ID double-spelling when host on
   calls.length = 0;
   const resBare = await h.call({
     method: 'GET',
-    path: `/subagent-router/batch?parentSessionId=${BARE}`
+    path: `/subagent-role-router/batch?parentSessionId=${BARE}`
   });
   assert.equal(resBare.status, 200);
   assert.equal(resBare.body.ok, true);
@@ -461,7 +468,7 @@ test('strictChildrenOf normalises parent session ID double-spelling when host on
   calls.length = 0;
   const resPrefixed = await h.call({
     method: 'GET',
-    path: `/subagent-router/batch?parentSessionId=${PREFIXED}`
+    path: `/subagent-role-router/batch?parentSessionId=${PREFIXED}`
   });
   assert.equal(resPrefixed.status, 200);
   assert.equal(resPrefixed.body.ok, true);
@@ -479,7 +486,7 @@ test('strictChildrenOf normalises parent session ID double-spelling when host on
   });
   const resFail = await hFailing.call({
     method: 'GET',
-    path: `/subagent-router/batch?parentSessionId=${BARE}`
+    path: `/subagent-role-router/batch?parentSessionId=${BARE}`
   });
   assert.equal(resFail.status, 200);
   assert.equal(resFail.body.ok, false);
@@ -628,24 +635,34 @@ test('keepEffort carries the strength already set, and cannot be combined with k
   h.dispose();
 });
 
-test('the batch write lands in the very next request, and a default strength clears the old one', async () => {
+test('the batch write applies through the front door at once, and a default strength clears the old one', async () => {
   const h = harness({
     children: [{ id: 'abc', mode: 'continuable' }],
-    live: [['abc', { provider: 'p', model: 'a', reasoningEffort: 'low' }]]
+    live: [['abc', { provider: 'p', model: 'a', reasoningEffort: 'low' }]],
+    selectable: ['abc']
   });
   const selected = await h.select('parent-1', [{ childId: 'abc', provider: 'q', model: 'b', reasoningEffort: 'medium' }]);
   assert.equal(selected.body.value.results[0].ok, true);
+  assert.equal(selected.body.value.results[0].applied, true, 'a live child gets the pick pushed through the front door immediately');
   const agent = h.agent('abc');
+  assert.deepEqual(agent.model.selects, [{ provider: 'q', model: 'b', reasoningEffort: 'medium' }]);
+
+  // The waterfall never rewrites the seed (the host freezes the selection and
+  // throws on a differing proposal): the request the child is already running
+  // keeps flowing through untouched, while the pick is re-pushed idempotently
+  // until the host's own seed catches up.
   const first = await h.request({ agent }, { provider: 'p', model: 'a', reasoningEffort: 'low', maxTokens: 100 });
-  assert.equal(first.provider, 'q');
-  assert.equal(first.model, 'b');
-  assert.equal(first.reasoningEffort, 'medium');
-  assert.equal(first.maxTokens, 100, 'the rest of the request header survives untouched');
+  assert.deepEqual(first, { provider: 'p', model: 'a', reasoningEffort: 'low', maxTokens: 100 },
+    'the rest of the request header survives untouched');
+  assert.equal(agent.model.selects.length, 2, 'the late apply re-picks the override while the seed lags');
+  assert.deepEqual(agent.model.selects[1], { provider: 'q', model: 'b', reasoningEffort: 'medium' });
+
+  // Asking for the default strength DELETES the inherited one: the front-door
+  // selection carries no effort at all, so the next step uses the model default.
   const cleared = await h.select('parent-1', [{ childId: 'abc', provider: 'q', model: 'b' }]);
   assert.equal(cleared.body.value.results[0].ok, true);
-  const second = await h.request({ agent }, { provider: 'p', model: 'a', reasoningEffort: 'low' });
-  assert.equal(second.provider, 'q');
-  assert.equal(second.reasoningEffort, undefined, 'asking for the default DELETES the inherited strength instead of keeping it');
+  assert.deepEqual(agent.model.selects.at(-1), { provider: 'q', model: 'b' });
+  assert.equal('reasoningEffort' in agent.model.selects.at(-1), false);
   h.dispose();
 });
 
@@ -707,9 +724,9 @@ test('empty selection and clear lists are bad requests', async () => {
 
 test('the batch routes are loopback-only and JSON-only', async () => {
   const h = harness({ children: [{ id: 'abc', mode: 'continuable' }], live: [['abc', { provider: 'p', model: 'a' }]] });
-  const remote = await h.call({ path: '/subagent-router/batch?parentSessionId=parent-1', remote: '10.0.0.5' });
+  const remote = await h.call({ path: '/subagent-role-router/batch?parentSessionId=parent-1', remote: '10.0.0.5' });
   assert.equal(remote.status, 403);
-  const wrongType = await h.call({ method: 'POST', path: '/subagent-router/batch/select', body: { parentSessionId: 'parent-1', selections: [] }, contentType: 'text/plain' });
+  const wrongType = await h.call({ method: 'POST', path: '/subagent-role-router/batch/select', body: { parentSessionId: 'parent-1', selections: [] }, contentType: 'text/plain' });
   assert.equal(wrongType.status, 415);
   h.dispose();
 });

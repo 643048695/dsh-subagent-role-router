@@ -31,6 +31,9 @@
 | **模型可调用工具**（`subagent_routes_inspect` / `subagent_routes_update`） | — | ✅ 2.6.0 新增 |
 | **SSE 变更推送**（选路 / 覆盖 / 故障切换即时广播，不再轮询） | — | ✅ 2.7.0 新增 |
 | **性能收口**（签名订阅 / 图形缓存 / 面板内计时） | — | ✅ 2.7.6 新增 |
+| **小动物点击直达 + 子代理页整窝**（宿主地址对象跳转、「↩ 主对话」、普通子代理也显示） | — | ✅ 5.1.0 新增 |
+| **出生分配策略**（默认池子说了算；页面白名单内的指定放行） | — | ✅ 5.1.0 新增 |
+| **换模型走宿主正门**（适配 rc.5 的 step 准备期守卫，不再被拦） | — | ✅ 5.1.0 重做 |
 
 ### 功能一：多模型分配策略 —— `round-robin` 顺序轮换 / `random` 随机切换
 
@@ -115,14 +118,14 @@ answer with this route. This line is system-provided context about the runtime, 
 
 从 2.3.0 起，子代理会话的标题栏右侧多了一个**模型下拉 + 推理强度下拉**：
 
-- **点了下一步就换** —— 不需要重启、不需要重新派发。插件在 `agent/request` 这道每步都会重走的接缝上改写 provider/model/effort，所以下一个请求就落在新模型上。正在跑的上下文一条不丢。
+- **点了下一步就换** —— 不需要重启、不需要重新派发。**5.1.0 起走宿主自己的正门**（`agent.model.select()`）：宿主从 rc.5 起把每个 step 的模型选择在准备期钉死，并加了守卫——任何 waterfall 钩子再改写请求里的模型都会被拒绝并弹「`use agent.model.select() before step preparation`」。插件不再改写请求，改调正门；因此切换在**下一步 / 下一轮**生效，重试中途换不了是宿主语义（重试沿用钉死的选择），换不了的对象在响应里如实带 `applied` 字段，不再假装成功。正在跑的上下文一条不丢。
 - **推理强度同改** —— 第二个下拉只列出该模型**自己声明的**强度（从模型目录读 `reasoning.efforts`）。没声明强度的模型不给编造的选项：实测 `sensenova/kimi-k3` 声明为空，硬发 `high` 会让宿主回 `UNSUPPORTED_REASONING_EFFORT` 并结束这一轮，所以这类模型的下拉是空的。
 - **空闲的子代理也能预先设** —— 还没发过请求的子代理没有「当前路由」可显示，但下拉照样可选；选完等它下次唤醒就用新模型。选择存的是「下一步用什么」，不是持久偏好，子代理一销毁就忘掉。
 - **↺ 复位** —— 手动选过之后右侧出现复位按钮，点它回到插件自动分配的模型（即清掉覆盖）。
 - **手动选择优先于自动切换** —— 你亲手点了一个模型之后，功能二的故障转移**不会**再把它悄悄换掉，也不会因此把该模型记进冷却。要让自动切换重新接管，点 ↺。
 - **只对子代理显示** —— 主会话标题栏不出现这个控件（主会话用宿主自带的模型下拉即可）。
 
-> 传输方式：插件自己注册了一个 loopback-only 的 HTTP 前缀路由 `/subagent-router`，前端用文档相对路径 fetch 它。完整端点表见下方 [HTTP 端点](#http-端点)。没有复用宿主的 `/api` RPC —— 那条 channel 只允许一个 interceptor（api-gateway 已占用），硬抢会把它顶掉。
+> 传输方式：插件自己注册了一个 loopback-only 的 HTTP 前缀路由 `/subagent-role-router`，前端用文档相对路径 fetch 它。完整端点表见下方 [HTTP 端点](#http-端点)。没有复用宿主的 `/api` RPC —— 那条 channel 只允许一个 interceptor（api-gateway 已占用），硬抢会把它顶掉。
 
 ### 功能六：标题栏小动物 —— 谁在干活、干了多久、花了多少 token
 
@@ -132,6 +135,9 @@ answer with this route. This line is system-provided context about the runtime, 
 - **干了多久、花了多少** —— 每行显示运行时长（`42秒` / `3分07秒` / `1小时05分`）与消耗（`1.2万 tokens`）。两个数都取自宿主给子代理会话的投影（`subagentTiming`、`tokenUsage`），**没有为此新加端点、也不轮询**；宿主没给数据时整段不显示，而不是印出 `0 tokens`。
 - **点一下进对话** —— 走宿主自己的导航服务（`ctx.uiWorkspace.openSession`，宿主子代理目录点开用的是同一个调用），点完面板自动收起；Tab 到某行按回车/空格同样能进。失败会记 `CRITTERS_OPEN_FAILED`，不会静默吞掉。
 - **面板贴按钮、跟着窗口走** —— 打开时量按钮位置：右边缘贴齐、上下挑有空间的一侧展开、高度不超过窗口剩余空间；窗口缩放或滚动时跟着重算。子代理多时面板内滚动。
+- **小动物本身就是按钮（5.1.0）** —— 点小动物用宿主自己的「父会话 + 子会话 + 会话类型」地址对象跳转，溢出的「+N」点开完整列表；导航不可用时回退为打开面板并记诊断日志，点击永远有反馈。悬停有简易标题（任务名 + 路由），面板行照旧可换模型、可进对话。
+- **子代理自己的页面也看得到整窝（5.1.0）** —— 锚到所属主对话，显示同一窝兄弟，条首有「↩ 主对话」一键回去。
+- **普通子代理也在场（5.1.0）** —— 团队成员走宿主会话清单，普通子代理不在那张清单里：插件额外挂一条自己的活动通道（挂载拉一次、收到开始/结束推送帧防抖重拉、开面板刷新），**不轮询**；清单优先，活动台账只补充。
 
 **性能是设计目标，不是事后补的**：
 
@@ -160,7 +166,17 @@ answer with this route. This line is system-provided context about the runtime, 
 
 宿主处理停止时先在常驻激活表里找子代理，**找不到就静默返回** —— 界面报告「已接受」、按钮变灰，子代理照旧在跑，而且没有任何地方说明原因。
 
-本插件现在包住共用的取消动作：测量宿主的返回值；一秒多后再确认一次运行状态；仍在运行就通过自己的 `/subagent-router/stop` 端点重试中断，覆盖两种 id 写法（带 / 不带 `session-` 前缀）与两种授权形状（父会话 / 常驻祖先），并把每次尝试的结果带回界面。**拒绝因此变成看得见的拒绝。**
+本插件现在包住共用的取消动作：测量宿主的返回值；一秒多后再确认一次运行状态；仍在运行就通过自己的 `/subagent-role-router/stop` 端点重试中断，覆盖两种 id 写法（带 / 不带 `session-` 前缀）与两种授权形状（父会话 / 常驻祖先），并把每次尝试的结果带回界面。**拒绝因此变成看得见的拒绝。**
+
+### 功能十：出生分配策略 —— 默认「池子说了算」
+
+**问题**：宿主会把主对话**正在用的**模型照抄进每个子代理的出生参数。旧逻辑看到「有人指定了模型」就让路——于是所有新子代理都继承主对话的模型，你配的池子形同虚设，得手动逐个切回来。
+
+新增 `birthRoutePolicy` 设置，默认 `pool`：
+
+- **`pool`（默认）**——出生参数里写的模型**不算数**：不在本页白名单里的显式模型会被替换成角色池 / 默认池的条目（其余参数如 token 上限照常保留，并占用一个池道）。**页面白名单内的模型视为有效指定**：精确 `(provider, model)` 对、不同供应商别名 + 同模型名、无斜杠短名（`dnq` → `group/dnq`）三种形状都认，原样放行且不占池道。
+- **`explicit`**——恢复旧行为：出生参数里写了模型就放行。
+- **优先级**：你在插件面板里亲手点的切换**永远最高**（它在出生之后发生）；AgentTeams 成员与豁免规则命中的孩子不受本策略影响。像 Mnemon 这类自己 spawn 子代理并自带模型的插件，在豁免清单里加一条名字前缀规则即可共存。
 
 ### 其他配置能力
 
@@ -204,29 +220,29 @@ dsh plugin add link:/path/to/dsh-subagent-role-router
 | 开关 | 作用 | 默认 |
 | --- | --- | --- |
 | `DSH_SUBAGENT_ROLE_ROUTER_LOG` | 设成一个**文件路径**后，停止兜底、`REJECT_NOT_LIVE`、`SET_OVERRIDE` 三处会把一行带时间戳的记录追加到该文件。不设则不落盘，任何路径都不写。 | 不设 |
-| 页面地址带 `?srrLog=1` | 打开客户端的调试通道（记录选路/覆盖/故障切换）。 | 关闭 |
-| `POST /subagent-router/debug` | 后端调试端点，返回最近一次记录的载荷；只有 `DSH_SUBAGENT_ROLE_ROUTER_LOG` 设了才会落盘（响应里 `logged` 字段如实说明）。 | — |
+| 页面地址带 `?srrLog=1`，或 `localStorage["dsh-subagent-role-router:log"]="1"` | 打开客户端选择器与小动物的调试通道（记录选路/覆盖/故障切换/导航回退）。 | 关闭 |
+| `POST /subagent-role-router/debug` | 后端调试端点，返回最近一次记录的载荷；只有 `DSH_SUBAGENT_ROLE_ROUTER_LOG` 设了才会落盘（响应里 `logged` 字段如实说明）。 | — |
 
 调试通道默认关闭的理由：它此前在**每次选择器渲染**时都发一次 POST —— 追 bug 的人照样能开，其他人不该为此付网络开销。
 
 ## HTTP 端点
 
-插件在 `http://127.0.0.1` 的 DSH 服务上注册了前缀路由 `/subagent-router`（loopback-only，前端用文档相对路径访问）：
+插件在 `http://127.0.0.1` 的 DSH 服务上注册了前缀路由 `/subagent-role-router`（loopback-only，前端用文档相对路径访问）：
 
 | 方法与路径 | 作用 |
 | --- | --- |
-| `GET /subagent-router/route?childId=` | 查一个子代理当前生效的路由（也用来确认后端跑的是哪个构建：`?childId=nothing`） |
-| `POST /subagent-router/select` | 给一个子代理设置模型/强度覆盖（运行中换模型走的也是这条） |
-| `POST /subagent-router/clear` | 清除某个子代理的覆盖 |
-| `POST /subagent-router/stop` | 停止兜底：按两种 id 写法、两种授权形状重试中断子代理 |
-| `GET /subagent-router/events` | SSE 变更流（选路、覆盖、故障切换、成员路由），25 秒心跳 |
-| `GET /subagent-router/activity` | 当前对话下子代理的活跃快照 |
-| `GET /subagent-router/batch` | 批量换模型卡片的数据（可写的直接子代理 + 模型池） |
-| `POST /subagent-router/batch/select` | 批量设置覆盖 |
-| `POST /subagent-router/batch/clear` | 批量清除覆盖 |
-| `GET /subagent-router/whitelist` | 原生白名单镜像的当前状态 |
-| `GET /subagent-router/exempt-candidates` | 豁免规则的候选值（preset / cwd / 名称前缀） |
-| `POST /subagent-router/debug` | 调试记录端点（见上方调试开关） |
+| `GET /subagent-role-router/route?childId=` | 查一个子代理当前生效的路由（也用来确认后端跑的是哪个构建：`?childId=nothing`） |
+| `POST /subagent-role-router/select` | 给一个子代理设置模型/强度覆盖（运行中换模型走的也是这条） |
+| `POST /subagent-role-router/clear` | 清除某个子代理的覆盖 |
+| `POST /subagent-role-router/stop` | 停止兜底：按两种 id 写法、两种授权形状重试中断子代理 |
+| `GET /subagent-role-router/events` | SSE 变更流（选路、覆盖、故障切换、成员路由），25 秒心跳 |
+| `GET /subagent-role-router/activity` | 当前对话下子代理的活跃快照 |
+| `GET /subagent-role-router/batch` | 批量换模型卡片的数据（可写的直接子代理 + 模型池） |
+| `POST /subagent-role-router/batch/select` | 批量设置覆盖 |
+| `POST /subagent-role-router/batch/clear` | 批量清除覆盖 |
+| `GET /subagent-role-router/whitelist` | 原生白名单镜像的当前状态 |
+| `GET /subagent-role-router/exempt-candidates` | 豁免规则的候选值（preset / cwd / 名称前缀） |
+| `POST /subagent-role-router/debug` | 调试记录端点（见上方调试开关） |
 
 ## 模型可调用的工具
 

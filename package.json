@@ -1,7 +1,7 @@
 {
   "name": "dsh-subagent-role-router",
-  "version": "5.0.0",
-  "description": "Route DSH subagent delegations: per-role candidate pools (spillover, overflow, failure cooldowns), round-robin or random distribution, cross-provider failover, fork window slicing, agent-teams exemption — plus observing and steering what is running: header critters with duration and token counts, mid-run and batch model switching, model-callable routing tools, SSE change push, and a stop fallback that turns a silent refusal into a visible one.",
+  "version": "5.1.0",
+  "description": "Route DSH subagent delegations: per-role candidate pools (spillover, overflow, failure cooldowns), round-robin or random distribution, cross-provider failover, fork window slicing, agent-teams exemption, whitelist-aware birth route policy — plus observing and steering what is running: header critters with duration and token counts, mid-run and batch model switching through the host's model.select gate, model-callable routing tools, SSE change push, and a stop fallback that turns a silent refusal into a visible one.",
   "keywords": [
     "deepseek-harness",
     "dsh",
@@ -19,6 +19,10 @@
     "fork",
     "route-visibility",
     "prompt-injection",
+    "header-critters",
+    "birth-policy",
+    "model-select",
+    "live-activity",
     "subagent-monitor",
     "token-usage",
     "batch-model-switch",
@@ -58,7 +62,7 @@
     "CHANGELOG.md"
   ],
   "scripts": {
-    "test": "node --test"
+    "test": "node --test test/activity-endpoint.test.mjs test/batch-switch-client.test.mjs test/batch-switch-render.test.mjs test/batch-switch.test.mjs test/client-audit.test.mjs test/critters-launch.test.mjs test/critters-render.test.mjs test/critters.test.mjs test/exempt-rules.test.mjs test/fork-window.test.mjs test/header-critters.test.mjs test/live-route-events.test.mjs test/live-route.test.mjs test/no-hardcoded-paths.test.mjs test/perf.test.mjs test/real-directory.test.mjs test/route-cache-sync.test.mjs test/router-audit.test.mjs test/router-tools.test.mjs test/schema-pool.test.mjs test/stop.test.mjs test/team-model.test.mjs test/tool-registration.test.mjs test/whitelist-sync.test.mjs"
   },
   "dsh": {
     "bundle": {

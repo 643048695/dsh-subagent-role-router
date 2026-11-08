@@ -95,14 +95,14 @@ The host's model dropdown is **disabled inside subagent conversations**: `sessio
 
 From 2.3.0, a subagent conversation gets a **model dropdown plus a reasoning-effort dropdown** in the header on the right:
 
-- **Applies from the next step** — no restart, no re-delegation. The plugin rewrites provider/model/effort on `agent/request`, the seam every step goes through, so the very next request lands on the new model. Nothing in the running context is lost.
+- **Applies from the next step** — no restart, no re-delegation. **From 5.1.0 the switch goes through the host's own front door** (`agent.model.select()`): since rc.5 the host pins each step's model selection at preparation time and guards it — any waterfall hook that rewrites the request's model is rejected with "`use agent.model.select() before step preparation`". The plugin no longer rewrites requests; it calls the front door. A switch therefore lands on the **next step / next turn** — a mid-retry switch is impossible (the retry reuses the pinned selection; host semantics), and an unswitchable target honestly carries an `applied` field instead of pretending. Nothing in the running context is lost.
 - **Effort changes too** — the second dropdown lists only the efforts the model itself declares (`reasoning.efforts` from the model catalog). A model that declares none gets no invented options: `sensenova/kimi-k3` declares an empty list, and forcing `high` on it makes the host answer `UNSUPPORTED_REASONING_EFFORT` and end the turn — so that dropdown stays empty for such models.
 - **Works on an idle child too** — a child that has not issued a request yet has no route to show, but the dropdown still accepts a pick; it takes effect on the next wake-up. The pick means "what the next step uses", not a persisted preference, and it is forgotten as soon as the child is disposed.
 - **↺ Reset** — after a manual pick a reset button appears; it drops the override and returns the child to whatever the plugin assigns automatically.
 - **A manual pick beats automatic failover** — once you have named a model, Capability 2 will not silently swap it away, and will not record that model in the cooldown list either. Click ↺ to hand routing back to the automatic path.
 - **Subagents only** — the control does not appear in a main conversation's header (the host's own dropdown covers that case).
 
-> Transport: the plugin registers its own loopback-only HTTP prefix route `/subagent-router` and the front end fetches it by document-relative path. The full endpoint table is in [HTTP endpoints](#http-endpoints). It deliberately does not reuse the host's `/api` RPC: that channel admits exactly one interceptor, which api-gateway already holds, so claiming it would displace it.
+> Transport: the plugin registers its own loopback-only HTTP prefix route `/subagent-role-router` and the front end fetches it by document-relative path. The full endpoint table is in [HTTP endpoints](#http-endpoints). It deliberately does not reuse the host's `/api` RPC: that channel admits exactly one interceptor, which api-gateway already holds, so claiming it would displace it.
 
 ### Capability 6 — Header critters: who is working, for how long, how many tokens
 
@@ -112,6 +112,9 @@ The right end of the session header carries up to three pixel figures, one per *
 - **How long and how much** — each row shows elapsed time (`42秒` / `3分07秒` / `1小时05分`) and usage (`1.2万 tokens`). Both come from the host's own projection for the child session (`subagentTiming`, `tokenUsage`): **no extra endpoint, no polling**. When the host has no data, that part is simply not rendered instead of printing `0 tokens`.
 - **Click to open the conversation** — it calls the host's own navigation service (`ctx.uiWorkspace.openSession`), the same call the host's subagent catalog uses; the panel collapses afterwards, and Enter/Space work on a focused row. A failure logs `CRITTERS_OPEN_FAILED` rather than disappearing.
 - **Anchored to the button, follows the window** — on open it measures the button: right edge aligned, opened to whichever side has room, height capped by the remaining viewport. It recomputes on resize and scroll, and scrolls inside the panel when there are many subagents.
+- **The critter itself is a button (5.1.0)** — clicking a critter navigates with the host's own "parent + child + session kind" address object; the overflowing "+N" opens the full list. When navigation is unavailable it falls back to opening the panel and logs a diagnostic, so a click always gives feedback. Hovering shows a compact title (task name + route); panel rows can still switch models or jump into the conversation.
+- **A subagent's own page shows the whole brood (5.1.0)** — anchored to its parent conversation, with a "↩ main conversation" button.
+- **Plain subagents show up too (5.1.0)** — team members come from the host's session tree, which never contained plain children: the plugin adds its own activity channel (one fetch on mount, a debounced refetch on start/stop push frames, a refresh when the panel opens), **no polling**; the tree wins, the activity ledger only adds.
 
 **Performance is a design constraint here, not a later fix**:
 
@@ -140,7 +143,17 @@ Two tools let the model inspect and rewrite subagent routing without a human cli
 
 When the host handles a stop request it looks the subagent up in the resident activation table and, **if it is not there, returns silently** — the UI reports "accepted", the button greys out, the subagent keeps running, and nothing says why.
 
-This plugin now wraps the shared cancel action: it measures the host's return value, re-checks the running state about a second later, and if the child is still running retries the interrupt through its own `/subagent-router/stop` endpoint — covering both id spellings (with and without the `session-` prefix) and both authorization shapes (parent session, resident ancestor) — and reports every attempt's outcome back to the UI. **A refusal becomes a visible refusal.**
+This plugin now wraps the shared cancel action: it measures the host's return value, re-checks the running state about a second later, and if the child is still running retries the interrupt through its own `/subagent-role-router/stop` endpoint — covering both id spellings (with and without the `session-` prefix) and both authorization shapes (parent session, resident ancestor) — and reports every attempt's outcome back to the UI. **A refusal becomes a visible refusal.**
+
+### Capability 10 — Birth route policy: the pool decides by default
+
+**The problem**: the host copies the main conversation's **current** model into every subagent's birth parameters. The old logic saw "someone specified a model" and stepped aside — so every new child inherited the main conversation's model and your pools did nothing until you switched each one by hand.
+
+A new `birthRoutePolicy` setting, default `pool`:
+
+- **`pool` (default)** — a model written into the birth parameters **does not count**: an off-list explicit model is replaced by a pool entry (other parameters such as token caps are kept, and the spawn occupies a pool lane). A model **on the page whitelist** is honoured as a deliberate pick: an exact `(provider, model)` pair, a different provider alias + same model name, or a bare short name (`dnq` → `group/dnq`) all match, pass through untouched, and occupy no lane.
+- **`explicit`** — the old behaviour: whatever the caller wrote is honoured.
+- **Precedence** — a switch you make in the plugin panel **always wins** (it happens after birth); agent-teams members and children matching an exemption rule are untouched. Plugins that spawn their own children with their own models (e.g. Mnemon) coexist via a name-prefix exemption rule.
 
 ### Other configuration
 
@@ -180,29 +193,29 @@ With no configuration the behavior is identical to not having the plugin install
 | Switch | Effect | Default |
 | --- | --- | --- |
 | `DSH_SUBAGENT_ROLE_ROUTER_LOG` | Point it at a **file path** and the stop fallback, `REJECT_NOT_LIVE` and `SET_OVERRIDE` append one timestamped line each. Unset, nothing is written anywhere. | unset |
-| `?srrLog=1` on the page URL | Enables the client debug channel (route picks, overrides, failover). | off |
-| `POST /subagent-router/debug` | Server-side debug endpoint; it only records anything when the log variable above is set, and says so in its `logged` field. | — |
+| `?srrLog=1` on the page URL, or `localStorage["dsh-subagent-role-router:log"]="1"` | Enables the client picker's and critters' debug channel (route picks, overrides, failover, navigation fallback). | off |
+| `POST /subagent-role-router/debug` | Server-side debug endpoint; it only records anything when the log variable above is set, and says so in its `logged` field. | — |
 
 The client channel is off by default on purpose: it used to POST on **every selector render** — whoever is chasing a bug can still turn it on, but nobody else should pay that network cost.
 
 ## HTTP endpoints
 
-The plugin registers the prefix route `/subagent-router` on the loopback DSH server (front end accesses it by document-relative path):
+The plugin registers the prefix route `/subagent-role-router` on the loopback DSH server (front end accesses it by document-relative path):
 
 | Method and path | Purpose |
 | --- | --- |
-| `GET /subagent-router/route?childId=` | The route currently in effect for one subagent (also the way to confirm which build the backend runs: `?childId=nothing`) |
-| `POST /subagent-router/select` | Set a model/effort override for one subagent (this is also how mid-run switching works) |
-| `POST /subagent-router/clear` | Clear one subagent's override |
-| `POST /subagent-router/stop` | Stop fallback: retry the interrupt with both id spellings and both authorization shapes |
-| `GET /subagent-router/events` | SSE change stream (route picks, overrides, failover, member routes), 25-second heartbeat |
-| `GET /subagent-router/activity` | Live snapshot of the subagents in the current conversation |
-| `GET /subagent-router/batch` | Data for the batch card (writable direct children + model pool) |
-| `POST /subagent-router/batch/select` | Set overrides in bulk |
-| `POST /subagent-router/batch/clear` | Clear overrides in bulk |
-| `GET /subagent-router/whitelist` | Current state of the native whitelist mirror |
-| `GET /subagent-router/exempt-candidates` | Candidate values for exemption rules (preset / cwd / name prefix) |
-| `POST /subagent-router/debug` | Debug record endpoint (see the switches above) |
+| `GET /subagent-role-router/route?childId=` | The route currently in effect for one subagent (also the way to confirm which build the backend runs: `?childId=nothing`) |
+| `POST /subagent-role-router/select` | Set a model/effort override for one subagent (this is also how mid-run switching works) |
+| `POST /subagent-role-router/clear` | Clear one subagent's override |
+| `POST /subagent-role-router/stop` | Stop fallback: retry the interrupt with both id spellings and both authorization shapes |
+| `GET /subagent-role-router/events` | SSE change stream (route picks, overrides, failover, member routes), 25-second heartbeat |
+| `GET /subagent-role-router/activity` | Live snapshot of the subagents in the current conversation |
+| `GET /subagent-role-router/batch` | Data for the batch card (writable direct children + model pool) |
+| `POST /subagent-role-router/batch/select` | Set overrides in bulk |
+| `POST /subagent-role-router/batch/clear` | Clear overrides in bulk |
+| `GET /subagent-role-router/whitelist` | Current state of the native whitelist mirror |
+| `GET /subagent-role-router/exempt-candidates` | Candidate values for exemption rules (preset / cwd / name prefix) |
+| `POST /subagent-role-router/debug` | Debug record endpoint (see the switches above) |
 
 ## Model-callable tools
 

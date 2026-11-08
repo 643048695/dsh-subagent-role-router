@@ -4,6 +4,29 @@
 
 **本项目是 [dingminhua/dsh-subagent-default-model](https://github.com/dingminhua/dsh-subagent-default-model)（MIT，Copyright (c) 2026 LaoDing）的衍生作品。** 3.0.0 之前的条目由原作撰写，其中的功能、修复与测试记录均属原作工作；本项目的改动从 **3.0.0** 起记录。
 
+## 5.1.0 (2026-11-09)
+
+把桌面线 2.7.7 → 2.8.2 的全部改动并入本仓库（与 5.0.0 合并的桌面版本线相接）。
+
+### Added
+
+- **小动物点击直达（桌面 2.7.8）。** 点小动物用宿主自己的「父会话 + 子会话 + 会话类型」地址对象跳转，不再依赖裸字符串调用；导航不可用时回退为打开面板并记诊断日志。悬停有简易标题（任务名 + 路由）。
+- **子代理页面显示整窝（桌面 2.7.9）。** 在子代理自己的会话页锚到所属主对话，显示同一窝正在跑的兄弟，条首有「↩ 主对话」。
+- **普通子代理数据腿（桌面 2.8.0）。** 团队成员走宿主会话清单，普通子代理不在其中：插件额外挂一条活动通道——挂载拉一次台账、收到开始/结束推送帧防抖重拉、打开面板时刷新——不轮询；清单优先，台账只补充。
+- **出生分配策略（桌面 2.8.1 / 2.8.2）。** 新增 `birthRoutePolicy`（默认 `pool`）：宿主照抄父对话模型的出生参数不再让池子失效——白名单外的显式模型被替换成角色池/默认池条目（并占一个池道）；页面白名单内的指定（精确路由、供应商别名 + 同模型名、无斜杠短名）原样放行且不占池道。面板手动切换永远最高优先；`explicit` 恢复旧行为。
+
+### Fixed
+
+- **换模型改走宿主正门（桌面 2.8.0）。** 宿主 rc.5 起把每个 step 的模型选择在准备期钉死并加守卫，旧的 waterfall 改写会被拒绝并弹「`use agent.model.select() before step preparation`」。现在面板切换与故障转移都调 `agent.model.select()`，报错消失；切换在下一步/下一轮生效（重试中途换不了是宿主语义，如实记录），换不了的对象在响应里如实带 `applied` 字段。故障转移不再在当步重试里生效，而是下一步起生效。
+- **小动物消失（React #310，桌面 2.7.10）。** 重挂效果被排在空态早退门之后，首帧少 hook、子代理出现后多 hook，槽位边界因此永久让位。效果已移回 hooks 区。
+- **HTTP 端点前缀统一为 `/subagent-role-router`**（5.0.0 合并时保留了桌面线的 `/subagent-router`，与仓库名不一致；文档与代码现在一致）。
+- **`scripts.test` 恢复显式枚举**（5.0.0 合并时退回了裸 `node --test`，本仓库的测试纪律要求逐个登记）。
+
+### Notes
+
+- 构建标记：`ROUTER_BUILD` = `2026-11-09.1`，`DSM_CLIENT_BUILD` = `2026-11-09.1`。
+- 测试 **251 项：249 通过 / 0 失败 / 2 跳过**（两项跳过是 `real-directory` 的环境相关用例，不设环境变量时如实跳过）。
+
 ## 5.0.0 (2026-11-02)
 
 这一版把两条开发线合成了一条。
@@ -16,7 +39,7 @@
 - **面板跟随与自适应（2.7.2 – 2.7.5）。** 面板按窗口定位：右边缘贴按钮、上下挑有空间的一侧展开、高度不超过窗口剩余空间，窗口缩放与滚动时跟着重算；高度上限约六成屏幕、超出在面板内滚动；宽度按内容收（`max-content` + `max-width`）；行文本是好读的预设短语，真实标签留在悬停提示里；路由未知时不印 `?/?`，开工时间未知时不印 `—`。
 - **批量换模型（2.4.0）。** 子代理卡片上的「⇄ 批量」：勾选目标、选模型与推理强度、应用。也可以只改强度保留各自模型，或者清除覆盖回到自动分配。可写范围与单点换模型一致：当前对话的直接子代理、设置页里的模型池、同一套强度校验与豁免规则。
 - **模型可调用工具（2.6.0）。** `subagent_routes_inspect` / `subagent_routes_update`：查每个子代理的实际路由、是否可写、模型池与各模型**自己声明**的强度；改单个、批量或团队成员，支持只改强度（`keep_model`）与重置（`reset`）。每个目标带独立 revision、整体带 epoch，批量可传 `expected_revisions` 做乐观并发；团队成员走 AgentTeams 的成员路由服务，保留成员名、childId、任务、attempt_id、消息队列与历史，服务不存在时明确报 `teams-unavailable`，绝不退回复制一份新成员。
-- **SSE 变更推送（2.7.0 – 2.7.1）。** `GET /subagent-router/events`：选路与清除立即广播，覆盖与故障切换按「提供方|模型|强度」签名去重后广播，25 秒心跳、hello 帧、仅回环可连。子代理卡片与批量入口因此**不再轮询**：改订宿主 sessions store（按运行中/来源/父会话/更新时间签名比对）加这路 SSE；窗口重新聚焦时核对一次；SSE 连续断 3 次自动降级为纯 store 信号并限速重试，恢复后自动升级回来。
+- **SSE 变更推送（2.7.0 – 2.7.1）。** `GET /subagent-role-router/events`：选路与清除立即广播，覆盖与故障切换按「提供方|模型|强度」签名去重后广播，25 秒心跳、hello 帧、仅回环可连。子代理卡片与批量入口因此**不再轮询**：改订宿主 sessions store（按运行中/来源/父会话/更新时间签名比对）加这路 SSE；窗口重新聚焦时核对一次；SSE 连续断 3 次自动降级为纯 store 信号并限速重试，恢复后自动升级回来。
 
 ### Changed
 
@@ -34,7 +57,7 @@
 
 ### Notes
 
-- 构建标记：`ROUTER_BUILD` = `2026-11-02.6`（后端本轮未改），`DSM_CLIENT_BUILD` = `2026-11-02.7`。用 `GET /subagent-router/route?childId=nothing` 可以确认实际加载的是哪一版后端。
+- 构建标记：`ROUTER_BUILD` = `2026-11-02.6`（后端本轮未改），`DSM_CLIENT_BUILD` = `2026-11-02.7`。用 `GET /subagent-role-router/route?childId=nothing` 可以确认实际加载的是哪一版后端。
 - 测试 **232 项：230 通过 / 0 失败 / 2 跳过**。两项跳过是 `real-directory` 的环境相关用例，不设环境变量时如实跳过。
 
 ## 4.2.1 (2026-10-30)
@@ -236,12 +259,12 @@
 
 ### Changed
 
-- **LiveRoutePicker 不再每 5 秒轮询路由状态。** 子代理卡片改订两路事件信号：宿主 sessions store 的变化（按「运行中/来源/父会话/更新时间」签名比对，签名没变就不发请求）和插件自有的 `/subagent-router/events` SSE 通道（选路写入、覆盖生效、故障切换时后端主动广播，客户端按 childId 对号核对）。窗口聚焦或从后台回来时强制核对一次；路由实例 epoch 变化（插件重载）时全量补全。SSE 连续断 3 次自动降级为纯 store 信号，之后每 30 秒最多重试 3 次，恢复成功自动升级回来；全程不复活定时器，空闲会话周期请求为 0。
+- **LiveRoutePicker 不再每 5 秒轮询路由状态。** 子代理卡片改订两路事件信号：宿主 sessions store 的变化（按「运行中/来源/父会话/更新时间」签名比对，签名没变就不发请求）和插件自有的 `/subagent-role-router/events` SSE 通道（选路写入、覆盖生效、故障切换时后端主动广播，客户端按 childId 对号核对）。窗口聚焦或从后台回来时强制核对一次；路由实例 epoch 变化（插件重载）时全量补全。SSE 连续断 3 次自动降级为纯 store 信号，之后每 30 秒最多重试 3 次，恢复成功自动升级回来；全程不复活定时器，空闲会话周期请求为 0。
 - **标题栏小动物回归「锚在会话标题行右端」的本意。** 以前写死 `top:47px/right:28px`，宿主界面加标签栏后正好压在标题栏空档；现在运行时测量标题行的实际位置贴上去，窗口缩放、滚动、布局变化都会跟随，量不到就留在按钮行原位（绝不悬空盖东西）。
 
 ### Added
 
-- **后端 SSE 广播端点 `GET /subagent-router/events`。** 选路/清除立即广播，覆盖与故障切换在真正改变生效路由时按「提供方|模型|强度」签名去重广播（同一子代理同一路由绝不刷屏），带 25 秒心跳与 hello 帧；仅回环地址可连。
+- **后端 SSE 广播端点 `GET /subagent-role-router/events`。** 选路/清除立即广播，覆盖与故障切换在真正改变生效路由时按「提供方|模型|强度」签名去重广播（同一子代理同一路由绝不刷屏），带 25 秒心跳与 hello 帧；仅回环地址可连。
 
 ## 2.7.0 (2026-11-02)
 
@@ -316,11 +339,11 @@
   - 伪造的 `childId`、别的对话的子代理、主代理自身 → `not-owned`；`session-` 前缀与裸 id 归一后再比较。
   - 父会话 ID 双拼写规范化：`strictChildrenOf` 调用 `subagents.listChildren(parentSessionId)` 时，若遇到找不到会话，仅尝试规范的候选双拼写（原样优先、备选重试，即裸 UUID 与 `session-` 前缀），两拼写均失败才报 `catalog-unavailable`，消除宿主 sessionQuery 对裸 ID 报 not found 的兼容问题。构建号升级至 `2026-10-31.2`。
 
-- **新增 `/subagent-router/batch` 三个端点**（同一 handler，自动继承 loopback-only / `application/json` / 8 KB body 这些既有闸门）：
+- **新增 `/subagent-role-router/batch` 三个端点**（同一 handler，自动继承 loopback-only / `application/json` / 8 KB body 这些既有闸门）：
 
-  - `GET /subagent-router/batch?parentSessionId=` → 直接子代理行（含 `selectable` / `reason` / 当前路由 / `pending`）与本页模型池（含每个模型可用的推理强度、配置来源）。
-  - `POST /subagent-router/batch/select` → `{ parentSessionId, selections: [{ childId, provider, model, reasoningEffort }] }`，或 `{ childId, keepModel: true, reasoningEffort }` 只改强度、保留该子代理当前（或已挂起覆盖里的）模型。
-  - `POST /subagent-router/batch/clear` → `{ parentSessionId, childIds }`。
+  - `GET /subagent-role-router/batch?parentSessionId=` → 直接子代理行（含 `selectable` / `reason` / 当前路由 / `pending`）与本页模型池（含每个模型可用的推理强度、配置来源）。
+  - `POST /subagent-role-router/batch/select` → `{ parentSessionId, selections: [{ childId, provider, model, reasoningEffort }] }`，或 `{ childId, keepModel: true, reasoningEffort }` 只改强度、保留该子代理当前（或已挂起覆盖里的）模型。
+  - `POST /subagent-role-router/batch/clear` → `{ parentSessionId, childIds }`。
 
   应用是**逐个子代理**的：一个失败不中断其它，返回每一项的 `ok` 与错误码（`not-owned` / `ended` / `exempt` / `external` / `unknown-mode` / `model-not-allowed` / `effort-unknown` / `model-unknown`），外加 `summary.ok/failed`。
 
@@ -358,7 +381,7 @@
 
   **注册顺序是有意的**：cordis waterfall 按注册顺序执行、post-`next()` 代码按**逆序**回卷，所以**先注册者有最终发言权**。`installChildRouteOverride` 注册在 `installFailover` **之前**，保证用户亲手点的模型不会被自动故障转移悄悄换掉。同时 `failoverView()` 在覆盖存在时返回 `undefined`，因此也不会在用户背后写冷却计数。
 
-- **新增 loopback-only HTTP 端点 `/subagent-router`**（`GET route` / `POST select` / `POST clear`），用 `ctx.webServer.register({ kind: "prefix", ... })` 自建，`webCtx.effect` 负责释放。
+- **新增 loopback-only HTTP 端点 `/subagent-role-router`**（`GET route` / `POST select` / `POST clear`），用 `ctx.webServer.register({ kind: "prefix", ... })` 自建，`webCtx.effect` 负责释放。
 
   为什么不复用宿主的 `/api` RPC：`connection.registerInterceptor` 对同一 channel **只允许一个** interceptor（`connection: shared RPC channel "/api" already has an interceptor`），而 api-gateway 已经占住了 `/api`，硬抢会把它顶掉；自己开一条前缀路由既不冲突，也不需要引入 `@deepseek-ai/dsh-typert-protocol`（插件 `dependencies` 里没有它，且 profile 的 `node_modules/@deepseek-ai` 只有 `cosmokit` 与 `schemastery`）。
 

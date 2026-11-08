@@ -47,12 +47,36 @@ function harness(settings = config) {
 }
 
 test('explicit Mnemon model and token controls survive every request',async()=>{
-  const h=harness(); const agentOptions={provider:'memory',model:'fixed',maxTokens:8192,reasoningEffort:'low'};
+  // Plugin coexistence: Mnemon spawns its own helpers with a private
+  // provider/model pair. Under the default "pool" birth policy the router
+  // would replace that pick, so the documented escape hatch is an exemption
+  // rule — exactly what a real profile adds for plugin-borne children.
+  const h=harness({...config,exemptRules:[{name:'mnemon',match:'label',pattern:'Mnemon'}]});
+  const agentOptions={provider:'memory',model:'fixed',maxTokens:8192,reasoningEffort:'low'};
   const request={parent:h.parent,prompt:'review',agentOptions};
   const result=await h.raw.startActivation({provider:'spawn',label:'Mnemon idle checkpoint review',request});
   assert.equal(result.request,request);
   const route=await h.waterfall('agent/request',{agent:{id:'memory',session:{header:{origin:'subagent'},snapshotEvents:()=>[]}}},agentOptions);
   assert.deepEqual(route,agentOptions);h.dispose();
+});
+test('pool birth policy replaces a caller-written model with the role pool',async()=>{
+  // The host copies the parent route into spawn options (observed 2026-11-09:
+  // every child born with the main conversation's magpie-responses +
+  // codex/gpt-6.1-sol). That is the parent's habit, not a user choice: the
+  // pool wins, while non-model controls (maxTokens) survive the rewrite.
+  const h=harness(); const agentOptions={provider:'magpie-responses',model:'codex/gpt-6.1-sol',maxTokens:8192};
+  const request={parent:h.parent,prompt:'review the failing test',agentOptions};
+  const result=await h.raw.startActivation({provider:'spawn',label:'code review helper',request});
+  assert.equal(result.request.agentOptions.provider,'p');
+  assert.equal(result.request.agentOptions.model,'explore');
+  assert.equal(result.request.agentOptions.maxTokens,8192);h.dispose();
+});
+test('explicit birth policy keeps the old let-it-through contract',async()=>{
+  const h=harness({...config,birthRoutePolicy:'explicit'});
+  const agentOptions={provider:'memory',model:'fixed',maxTokens:8192};
+  const request={parent:h.parent,prompt:'review the failing test',agentOptions};
+  const result=await h.raw.startActivation({provider:'spawn',label:'code review helper',request});
+  assert.equal(result.request,request);h.dispose();
 });
 test('token-only options get role default without dropping maxTokens or tool policy',async()=>{
   const h=harness(); const toolFilter={allow:['read','edit']};
@@ -142,14 +166,23 @@ function poolHarness(overrides = {}) {
     dispose() { for (const fn of cleanups.reverse()) fn(); } };
 }
 
-const subagent = (id, served) => ({
-  id,
-  session: {
-    header: { origin: 'subagent' },
-    snapshotEvents: () => [],
-    requestContext: () => served
+const subagent = (id, served, withSelect = false) => {
+  const agent = {
+    id,
+    session: {
+      header: { origin: 'subagent' },
+      snapshotEvents: () => [],
+      requestContext: () => served
+    }
+  };
+  if (withSelect) {
+    // The host's front door (`model.select`), recorded so tests can assert
+    // exactly which selection was pushed onto the child.
+    const selects = [];
+    agent.model = { selects, select(selection) { selects.push({ ...selection }); } };
   }
-});
+  return agent;
+};
 
 test('one candidate behaves exactly like the old single-value role route',async()=>{
   const h=poolHarness({patchModels:[{provider:'p',model:'only'}],roleSlotCooldownSeconds:15});
@@ -216,8 +249,29 @@ test('a fully cooled pool still serves the delegation and says so',async()=>{
   assert.ok(h.warns.some((args)=>String(args[0]).includes('cooling down')));h.dispose();
 });
 
-test('an explicit model bypasses the pool and occupies no lane',async()=>{
+test('an off-list birth model is replaced by the pool and occupies a lane (default policy)',async()=>{
+  // The host copies the parent route into every spawn, so "someone named a
+  // model" no longer implies "the user picked it": an off-list pick is
+  // replaced and DOES occupy a lane, exactly like any pool traffic.
   const h=poolHarness();
+  h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'copied from parent',agentOptions:{provider:'x',model:'y'}}});
+  h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'pooled'}});
+  assert.deepEqual(h.models(),['m1','m2']);h.dispose();
+});
+test('a birth pick on the page whitelist is honoured under the default policy',async()=>{
+  // A pick that names a route the page configures IS a real choice: the exact
+  // pair matches, a renamed provider with the same model matches, and a bare
+  // short name matches. Honoured picks bypass pool routing and occupy no lane
+  // — the next pooled spawn still starts from the head of the pool.
+  const h=poolHarness();
+  h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'exact',agentOptions:{provider:'p',model:'m2'}}});
+  h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'renamed provider',agentOptions:{provider:'gateway-alias',model:'base-b'}}});
+  h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'short name',agentOptions:{model:'m3'}}});
+  h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'pooled'}});
+  assert.deepEqual(h.models(),['m2','base-b','m3','m1']);h.dispose();
+});
+test('an explicit model bypasses the pool and occupies no lane under the explicit policy',async()=>{
+  const h=poolHarness({birthRoutePolicy:'explicit'});
   h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'pinned',agentOptions:{provider:'x',model:'y'}}});
   h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'pooled'}});
   assert.deepEqual(h.models(),['y','m1']);h.dispose();
@@ -227,15 +281,18 @@ test('a role failure fails over inside its own pool, not the base pool',async()=
   const h=poolHarness({patchModels:[{provider:'p',model:'m1'},{provider:'p',model:'m2'}]});
   h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'work'}});
   const child=h.pending[0];
-  const agent=subagent(child.childId,{provider:'p',model:'m1'});
+  const agent=subagent(child.childId,{provider:'p',model:'m1'},true);
   const retry=await h.waterfall('agent/request-error',{agent,turn:1,step:1,failure:{code:'TIMEOUT'}},undefined);
   assert.deepEqual(retry,{kind:'retry'});
+  // The front door selected the role pool's second entry for the NEXT step the
+  // moment the failure was seen; the rebuilt request itself is never rewritten
+  // (the host freezes the selection and throws on a proposal that differs).
+  assert.deepEqual(agent.model.selects,[{provider:'p',model:'m2'}]);
   const seed={provider:'p',model:'m1',reasoningEffort:'max',maxTokens:100};
   const switched=await h.waterfall('agent/request',{agent},seed);
-  assert.equal(switched.provider,'p');
-  assert.equal(switched.model,'m2');
-  assert.equal(switched.maxTokens,100);
-  assert.equal(switched.reasoningEffort,undefined);h.dispose();
+  assert.deepEqual(switched,seed);
+  assert.equal(agent.model.selects.length,2,'the target is re-picked while the seed lags');
+  h.dispose();
 });
 
 // ── unusable candidates: a dead row must not win the pool forever ────────────
@@ -275,11 +332,12 @@ test('an unusable candidate is cooled down and the next task skips it',async()=>
 test('an unusable candidate also fails over inside its own pool',async()=>{
   const h=poolHarness({patchModels:[{provider:'p',model:'m1'},{provider:'p',model:'m2'}]});
   h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'work'}});
-  const agent=subagent(h.pending[0].childId,{provider:'p',model:'m1'});
+  const agent=subagent(h.pending[0].childId,{provider:'p',model:'m1'},true);
   const retry=await h.waterfall('agent/request-error',{agent,turn:1,step:1,failure:{code:'UNKNOWN_MODEL',message:'no such model'}},undefined);
   assert.deepEqual(retry,{kind:'retry'});
+  assert.deepEqual(agent.model.selects,[{provider:'p',model:'m2'}]);
   const switched=await h.waterfall('agent/request',{agent},{provider:'p',model:'m1'});
-  assert.equal(switched.model,'m2');h.dispose();
+  assert.deepEqual(switched,{provider:'p',model:'m1'});h.dispose();
 });
 
 test('a malformed request still surfaces instead of switching candidates',async()=>{

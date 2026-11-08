@@ -3,18 +3,20 @@ import assert from 'node:assert/strict';
 import { apply } from '../lib/index.js';
 
 // Live per-child route override: the Web UI picks a model/effort for a RUNNING
-// subagent and the plugin applies it on that child's next request.
+// subagent and the plugin applies it on that child.
 //
-// The two invariants worth locking down here are the ones that are invisible in
-// the UI and expensive to rediscover from a browser:
+// THE HOST CONTRACT (2026-11-04 build, the reason this file looks the way it
+// does): the loop freezes the selection before step preparation and THROWS on
+// any `agent/request` proposal that differs from it — so the waterfall must
+// hand the seed back untouched, and every live change goes through the front
+// door `agent.model.select()` instead (effective from the child's NEXT step).
 //
-//   1. The override must WIN over the automatic failover swap. Cordis waterfalls
-//      run listeners in registration order and unwind in reverse, so the plugin
-//      registers this listener FIRST on purpose. If someone reorders `apply()`,
-//      the user's explicit pick silently becomes the failover's pick — the exact
-//      "I clicked and nothing happened" bug this feature exists to fix.
-//   2. The override is per child. A sibling subagent on the same pool must keep
-//      its own route.
+//   1. The seed is never rewritten. If a listener starts mutating it again,
+//      the host throws "agent/request proposed … after step preparation …"
+//      on every step of every running child — the exact red toast this file
+//      exists to keep dead.
+//   2. The override is per child. A sibling subagent on the same pool must
+//      keep its own route and must not be selected.
 
 const config = {
   roleMode: true,
@@ -104,8 +106,8 @@ function harness(settings = config) {
 
   /** Drive the plugin's own HTTP route. */
   async function call({ method = 'POST', path, body, remote = '127.0.0.1', contentType = 'application/json' }) {
-    const route = routes.find((entry) => entry.path === '/subagent-router');
-    assert.ok(route, 'the plugin must claim /subagent-router');
+    const route = routes.find((entry) => entry.path === '/subagent-role-router');
+    assert.ok(route, 'the plugin must claim /subagent-role-router');
     const payload = body === undefined ? '' : JSON.stringify(body);
     const req = {
       method,
@@ -140,7 +142,7 @@ function harness(settings = config) {
    * showed "Default" for every child while the suite stayed green. The fake
    * now mirrors the real split so that gap cannot reopen.
    */
-  function liveChild(id, route = { provider: 'p', model: 'general' }) {
+  function liveChild(id, route = { provider: 'p', model: 'general' }, opts = {}) {
     const agent = {
       id,
       session: {
@@ -151,6 +153,16 @@ function harness(settings = config) {
       },
       options: { provider: 'parent', model: 'parent' }
     };
+    if (opts.withModelSelect) {
+      // The host's loop agents expose the front door (`model.select`); disk
+      // stubs and older hosts do not. Recorded so tests can assert exactly
+      // which selection was pushed onto the child.
+      const selects = [];
+      agent.model = {
+        selects,
+        select(selection) { selects.push({ ...selection }); }
+      };
+    }
     agents.set(id, agent);
     return agent;
   }
@@ -162,55 +174,84 @@ const childPayload = (agent) => ({ turn: 0, step: 0, agent });
 
 test('an override picked in the UI wins over the failover swap', async () => {
   const h = harness();
-  const child = h.liveChild('child-1');
+  const child = h.liveChild('child-1', { provider: 'p', model: 'general' }, { withModelSelect: true });
   // Failover would move this child to the next pool entry; the user's pick must
   // be the route that actually reaches the provider.
-  const seeded = { provider: 'p', model: 'a', reasoningEffort: 'max', maxTokens: 4096 };
+  const seeded = { provider: 'p', model: 'general', reasoningEffort: 'max', maxTokens: 4096 };
 
   const before = await h.request(childPayload(child), seeded);
-  assert.equal(before.model, 'a', 'without an override the pool decides');
+  assert.equal(before, seeded, 'without an override the waterfall is a pass-through');
 
   const selected = await h.call({
-    path: '/subagent-router/select',
+    path: '/subagent-role-router/select',
     body: { childId: 'child-1', provider: 'q', model: 'b', reasoningEffort: 'low' }
   });
   assert.equal(selected.status, 200);
   assert.equal(selected.body.ok, true);
   assert.deepEqual(selected.body.value.override, { provider: 'q', model: 'b', reasoningEffort: 'low' });
+  // The pick goes through the host's front door the moment it is made.
+  assert.equal(selected.body.applied, true, 'a live child with model.select must report applied=true');
+  assert.deepEqual(child.model.selects, [{ provider: 'q', model: 'b', reasoningEffort: 'low' }]);
 
+  // THE HOST CONTRACT: the waterfall hands the frozen seed back EXACTLY as the
+  // loop built it (same object, same route, same budget) — rewriting it is what
+  // made the host throw on every step.
   const after = await h.request(childPayload(child), seeded);
-  assert.equal(after.provider, 'q');
-  assert.equal(after.model, 'b');
-  assert.equal(after.reasoningEffort, 'low');
-  // Everything else about the request must survive: the override only swaps the
-  // route, never the budget or the tool policy.
+  assert.equal(after, seeded, 'the waterfall must never rewrite the seed');
   assert.equal(after.maxTokens, 4096);
   h.dispose();
 });
 
 test('an override applies to its own child only', async () => {
   const h = harness();
-  const one = h.liveChild('child-1');
-  const two = h.liveChild('child-2');
-  await h.call({ path: '/subagent-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
+  const one = h.liveChild('child-1', { provider: 'p', model: 'general' }, { withModelSelect: true });
+  const two = h.liveChild('child-2', { provider: 'p', model: 'general' }, { withModelSelect: true });
+  await h.call({ path: '/subagent-role-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
 
   const seeded = { provider: 'p', model: 'a' };
-  assert.equal((await h.request(childPayload(one), seeded)).model, 'b');
-  assert.equal((await h.request(childPayload(two), seeded)).model, 'a');
+  // Seeds pass through untouched for BOTH children …
+  assert.equal((await h.request(childPayload(one), seeded)), seeded);
+  assert.equal((await h.request(childPayload(two), seeded)), seeded);
+  // … but only the named child was moved through the front door: once by the
+  // pick itself, once by the late apply while the seed has not caught up.
+  assert.deepEqual(one.model.selects, [{ provider: 'q', model: 'b' }, { provider: 'q', model: 'b' }]);
+  assert.deepEqual(two.model.selects, [], 'a sibling must never be selected');
   h.dispose();
 });
 
 test('an override with no effort drops the inherited one instead of leaking it', async () => {
   const h = harness();
-  const child = h.liveChild('child-1');
-  await h.call({ path: '/subagent-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
+  const child = h.liveChild('child-1', { provider: 'p', model: 'general' }, { withModelSelect: true });
+  await h.call({ path: '/subagent-role-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
 
-  // A provider whose thinking level must agree with the effort rejects a
-  // mismatched pair, so inheriting `max` from the route being left would break
-  // the very first request after the switch.
-  const after = await h.request(childPayload(child), { provider: 'p', model: 'a', reasoningEffort: 'max' });
-  assert.equal(after.model, 'b');
-  assert.equal('reasoningEffort' in after, false, 'the inherited effort must be dropped, not carried over');
+  // The frozen seed may keep its effort — rewriting it is illegal. The drop
+  // happens in the SELECTION handed to model.select: inheriting `max` from the
+  // route being left would break the very first step after the switch on a
+  // provider whose thinking level must agree with the effort.
+  const seeded = { provider: 'p', model: 'a', reasoningEffort: 'max' };
+  assert.equal(await h.request(childPayload(child), seeded), seeded);
+  for (const selection of child.model.selects) {
+    assert.equal('reasoningEffort' in selection, false, 'the inherited effort must be dropped, not carried over');
+    assert.deepEqual(selection, { provider: 'q', model: 'b' });
+  }
+  h.dispose();
+});
+
+test('an override written while the child is idle lands through the front door on its next request', async () => {
+  const h = harness();
+  const child = h.liveChild('child-1', { provider: 'p', model: 'general' }, { withModelSelect: true });
+  await h.call({ path: '/subagent-role-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
+  assert.equal(child.model.selects.length, 1, 'the pick itself is applied immediately');
+
+  // The waterfall never rewrites — but while the seed has not caught up with
+  // the override it re-selects (idempotent), covering children whose override
+  // was written before they were spawned.
+  const seeded = { provider: 'p', model: 'general' };
+  assert.equal(await h.request(childPayload(child), seeded), seeded);
+  assert.deepEqual(child.model.selects, [
+    { provider: 'q', model: 'b' },
+    { provider: 'q', model: 'b' }
+  ]);
   h.dispose();
 });
 
@@ -223,7 +264,7 @@ test('failover stays out of the way while an override is live', async () => {
   const retried = await h.error(child, { code: 'TIMEOUT', message: 'slow' }, { kind: 'continue' });
   assert.deepEqual(retried, { kind: 'retry' });
 
-  await h.call({ path: '/subagent-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
+  await h.call({ path: '/subagent-role-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
 
   // With an override live the user has named the model, so an automatic swap
   // would silently overrule that pick. The failure must surface instead, and no
@@ -234,20 +275,38 @@ test('failover stays out of the way while an override is live', async () => {
   h.dispose();
 });
 
+test('a failover switch is applied through the front door, not the waterfall', async () => {
+  const h = harness();
+  const child = h.liveChild('child-1', { provider: 'p', model: 'general' }, { withModelSelect: true });
+
+  const retried = await h.error(child, { code: 'TIMEOUT', message: 'slow' }, { kind: 'continue' });
+  assert.deepEqual(retried, { kind: 'retry' });
+  // The in-flight retry keeps the failing route (the loop retains the frozen
+  // selection across retries — the host allows nothing else); the target for
+  // the NEXT step is selected here, the moment the failure is seen. The served
+  // route is not in the pool, so round-robin starts at entry 0 (p/a).
+  assert.deepEqual(child.model.selects, [{ provider: 'p', model: 'a' }]);
+  h.dispose();
+});
+
 test('reset and disposal forget the override', async () => {
   const h = harness();
-  const child = h.liveChild('child-1');
-  await h.call({ path: '/subagent-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
-  assert.equal((await h.request(childPayload(child), { provider: 'p', model: 'a' })).model, 'b');
+  const child = h.liveChild('child-1', { provider: 'p', model: 'general' }, { withModelSelect: true });
+  await h.call({ path: '/subagent-role-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
+  assert.equal(child.model.selects.length, 1);
 
-  const cleared = await h.call({ path: '/subagent-router/clear', body: { childId: 'child-1' } });
+  const cleared = await h.call({ path: '/subagent-role-router/clear', body: { childId: 'child-1' } });
   assert.equal(cleared.body.ok, true);
   assert.equal(cleared.body.value.override, null);
-  assert.equal((await h.request(childPayload(child), { provider: 'p', model: 'a' })).model, 'a');
+  // After a clear the front door is left alone: the child keeps whatever the
+  // host last selected for it.
+  await h.request(childPayload(child), { provider: 'p', model: 'a' });
+  assert.equal(child.model.selects.length, 1);
 
-  await h.call({ path: '/subagent-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
+  await h.call({ path: '/subagent-role-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
   h.emit('agent/disposed', { agent: child });
-  assert.equal((await h.request(childPayload(child), { provider: 'p', model: 'a' })).model, 'a');
+  await h.request(childPayload(child), { provider: 'p', model: 'a' });
+  assert.equal(child.model.selects.length, 2, 'a disposed child must not be re-selected again');
   h.dispose();
 });
 
@@ -259,15 +318,15 @@ test('the route reports the live pair and the pending override separately', asyn
   // reporting "high" below can only come from the request header.
   assert.equal(child.session.requestContext().reasoningEffort, undefined);
 
-  const initial = await h.call({ method: 'GET', path: '/subagent-router/route?childId=child-1', body: undefined });
+  const initial = await h.call({ method: 'GET', path: '/subagent-role-router/route?childId=child-1', body: undefined });
   assert.equal(initial.body.ok, true);
   assert.equal(initial.body.value.provider, 'p');
   assert.equal(initial.body.value.model, 'general');
   assert.equal(initial.body.value.reasoningEffort, 'high');
   assert.equal(initial.body.value.override, null);
 
-  await h.call({ path: '/subagent-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
-  const pending = await h.call({ method: 'GET', path: '/subagent-router/route?childId=child-1', body: undefined });
+  await h.call({ path: '/subagent-role-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
+  const pending = await h.call({ method: 'GET', path: '/subagent-role-router/route?childId=child-1', body: undefined });
   // The child is idle, so `requestContext()` still reports the OLD route while
   // the override describes where it will go next. The UI shows both.
   assert.equal(pending.body.value.model, 'general');
@@ -277,14 +336,14 @@ test('the route reports the live pair and the pending override separately', asyn
 
 test('an unknown or finished child is refused instead of silently accepted', async () => {
   const h = harness();
-  const missing = await h.call({ path: '/subagent-router/select', body: { childId: 'nope', provider: 'q', model: 'b' } });
+  const missing = await h.call({ path: '/subagent-role-router/select', body: { childId: 'nope', provider: 'q', model: 'b' } });
   assert.equal(missing.body.ok, false);
   assert.equal(missing.body.error.code, 'not-live');
 
   // A main-agent session must not be reachable through this route: the whole
   // point is that it only ever touches subagent children.
   h.agents.set('main-1', { id: 'main-1', session: { header: {}, requestContext: () => ({}) } });
-  const main = await h.call({ path: '/subagent-router/select', body: { childId: 'main-1', provider: 'q', model: 'b' } });
+  const main = await h.call({ path: '/subagent-role-router/select', body: { childId: 'main-1', provider: 'q', model: 'b' } });
   assert.equal(main.body.ok, false);
   assert.equal(main.body.error.code, 'not-live');
   h.dispose();
@@ -294,19 +353,19 @@ test('the endpoint is loopback-only and refuses non-JSON posts', async () => {
   const h = harness();
   h.liveChild('child-1');
 
-  const remote = await h.call({ path: '/subagent-router/select', remote: '192.168.1.20', body: { childId: 'child-1', provider: 'q', model: 'b' } });
+  const remote = await h.call({ path: '/subagent-role-router/select', remote: '192.168.1.20', body: { childId: 'child-1', provider: 'q', model: 'b' } });
   assert.equal(remote.status, 403);
   assert.equal(remote.body.error.code, 'forbidden');
 
   // A cross-site form cannot send application/json without a CORS preflight, so
   // requiring it doubles as CSRF hardening.
-  const form = await h.call({ path: '/subagent-router/select', contentType: 'text/plain', body: { childId: 'child-1', provider: 'q', model: 'b' } });
+  const form = await h.call({ path: '/subagent-role-router/select', contentType: 'text/plain', body: { childId: 'child-1', provider: 'q', model: 'b' } });
   assert.equal(form.status, 415);
 
-  const empty = await h.call({ path: '/subagent-router/select', body: { childId: 'child-1', provider: '', model: '' } });
+  const empty = await h.call({ path: '/subagent-role-router/select', body: { childId: 'child-1', provider: '', model: '' } });
   assert.equal(empty.status, 400);
 
-  const unknown = await h.call({ path: '/subagent-router/nope', body: {} });
+  const unknown = await h.call({ path: '/subagent-role-router/nope', body: {} });
   assert.equal(unknown.status, 404);
   h.dispose();
 });

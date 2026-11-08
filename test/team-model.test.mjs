@@ -109,8 +109,8 @@ function harness(settings = config) {
   }
 
   async function call({ method = 'POST', path, body, remote = '127.0.0.1', contentType = 'application/json' }) {
-    const route = routes.find((entry) => entry.path === '/subagent-router');
-    assert.ok(route, 'the plugin must claim /subagent-router');
+    const route = routes.find((entry) => entry.path === '/subagent-role-router');
+    assert.ok(route, 'the plugin must claim /subagent-role-router');
     const payload = body === undefined ? '' : JSON.stringify(body);
     const req = {
       method,
@@ -135,7 +135,7 @@ function harness(settings = config) {
   }
 
   /** Register a live child the way the host would. Team members differ only in the label. */
-  function liveChild(id, { label = id, route = { provider: 'p', model: 'a' } } = {}) {
+  function liveChild(id, { label = id, route = { provider: 'p', model: 'a' }, select = false } = {}) {
     const agent = {
       id,
       session: {
@@ -145,6 +145,12 @@ function harness(settings = config) {
       },
       options: { provider: 'parent', model: 'parent' }
     };
+    if (select) {
+      // The host's front door (`model.select`), recorded so tests can assert
+      // exactly which selection was pushed onto the child.
+      const selects = [];
+      agent.model = { selects, select(selection) { selects.push({ ...selection }); } };
+    }
     agents.set(id, agent);
     return agent;
   }
@@ -268,25 +274,27 @@ test('an explicit agentOptions on a team spawn wins over the birth model', async
 
 test('the override endpoint accepts an agent-teams member and re-routes it', async () => {
   const h = harness();
-  const member = h.liveChild('m4', { label: 'agent-teams: worker' });
+  const member = h.liveChild('m4', { label: 'agent-teams: worker', select: true });
 
-  const read = await h.call({ method: 'GET', path: '/subagent-router/route?childId=m4' });
+  const read = await h.call({ method: 'GET', path: '/subagent-role-router/route?childId=m4' });
   assert.equal(read.status, 200);
   assert.equal(read.body.ok, true, 'a team member is a live child for the override');
   assert.equal(read.body.value.model, 'a');
 
   const selected = await h.call({
-    path: '/subagent-router/select',
+    path: '/subagent-role-router/select',
     body: { childId: 'm4', provider: 'q', model: 'b', reasoningEffort: 'high' }
   });
   assert.equal(selected.status, 200);
   assert.equal(selected.body.ok, true);
+  assert.equal(selected.body.applied, true, 'the pick is pushed through the front door at once');
+  assert.deepEqual(member.model.selects, [{ provider: 'q', model: 'b', reasoningEffort: 'high' }]);
 
+  // The rebuilt request is handed back untouched — the host freezes the
+  // selection and throws on a differing proposal — while the pick lands on
+  // the member's next step.
   const after = await h.request(childPayload(member), { provider: 'p', model: 'a', maxTokens: 4096 });
-  assert.equal(after.provider, 'q');
-  assert.equal(after.model, 'b');
-  assert.equal(after.reasoningEffort, 'high');
-  assert.equal(after.maxTokens, 4096);
+  assert.deepEqual(after, { provider: 'p', model: 'a', maxTokens: 4096 });
   h.dispose();
 });
 

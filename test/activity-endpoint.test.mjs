@@ -110,7 +110,7 @@ test("a spawn reaches the activity route without a lane lease", async () => {
 
 	h.spawn({ prompt: "look around", label: "explore", parent: { id: "session-p1" } });
 
-	const mine = await h.get("/subagent-router/activity?parentSessionId=session-p1");
+	const mine = await h.get("/subagent-role-router/activity?parentSessionId=session-p1");
 	assert.equal(mine.status, 200);
 	assert.equal(mine.body.ok, true);
 	assert.equal(mine.body.value.count, 1);
@@ -118,7 +118,7 @@ test("a spawn reaches the activity route without a lane lease", async () => {
 	assert.equal(mine.body.value.active[0].label, "explore");
 	assert.equal(typeof mine.body.value.active[0].ageMs, "number");
 
-	const other = await h.get("/subagent-router/activity?parentSessionId=session-p2");
+	const other = await h.get("/subagent-role-router/activity?parentSessionId=session-p2");
 	assert.equal(other.body.value.count, 0);
 });
 
@@ -126,11 +126,11 @@ test("disposal removes the child from the route", async () => {
 	const h = harness();
 
 	h.spawn({ prompt: "look around", label: "explore", parent: { id: "session-p1" } });
-	assert.equal((await h.get("/subagent-router/activity?parentSessionId=session-p1")).body.value.count, 1);
+	assert.equal((await h.get("/subagent-role-router/activity?parentSessionId=session-p1")).body.value.count, 1);
 
 	h.emit("agent/disposed", { agent: { id: "child-abc" } });
 
-	assert.equal((await h.get("/subagent-router/activity?parentSessionId=session-p1")).body.value.count, 0);
+	assert.equal((await h.get("/subagent-role-router/activity?parentSessionId=session-p1")).body.value.count, 0);
 });
 
 test("an unfinished spawn is not left behind when the route answers without a filter", async () => {
@@ -138,7 +138,7 @@ test("an unfinished spawn is not left behind when the route answers without a fi
 
 	h.spawn({ prompt: "look around", label: "explore", parent: { id: "session-p1" } });
 
-	const all = await h.get("/subagent-router/activity");
+	const all = await h.get("/subagent-role-router/activity");
 	assert.equal(all.body.ok, true);
 	assert.equal(all.body.value.count, 1);
 });

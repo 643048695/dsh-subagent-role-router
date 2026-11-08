@@ -211,7 +211,7 @@ function loadClient() {
     }
   };
   client.apply(ctx);
-  const pickerIndex = slotRegistrations.findIndex((opts) => opts.id === "subagent-router-live-route");
+  const pickerIndex = slotRegistrations.findIndex((opts) => opts.id === "subagent-role-router-live-route");
   if (pickerIndex === -1 || typeof slotComponents[pickerIndex] !== "function") {
     throw new Error("apply() did not register the live route picker");
   }

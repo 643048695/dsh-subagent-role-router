@@ -89,8 +89,8 @@ function harness(settings = config) {
   }
 
   async function call({ method = 'POST', path, body, remote = '127.0.0.1', contentType = 'application/json' }) {
-    const route = routes.find((entry) => entry.path === '/subagent-router');
-    assert.ok(route, 'the plugin must claim /subagent-router');
+    const route = routes.find((entry) => entry.path === '/subagent-role-router');
+    assert.ok(route, 'the plugin must claim /subagent-role-router');
     const payload = body === undefined ? '' : JSON.stringify(body);
     const req = {
       method,
@@ -119,12 +119,12 @@ function harness(settings = config) {
    * collects raw frames in order; the request never ends (a live stream).
    */
   async function openEvents() {
-    const route = routes.find((entry) => entry.path === '/subagent-router');
-    assert.ok(route, 'the plugin must claim /subagent-router');
+    const route = routes.find((entry) => entry.path === '/subagent-role-router');
+    assert.ok(route, 'the plugin must claim /subagent-role-router');
     const closeHandlers = [];
     const req = {
       method: 'GET',
-      url: '/subagent-router/events',
+      url: '/subagent-role-router/events',
       headers: {},
       socket: { remoteAddress: '127.0.0.1' },
       on(event, fn) {
@@ -146,7 +146,7 @@ function harness(settings = config) {
     return { req, res, close() { for (const fn of closeHandlers.splice(0)) fn(); } };
   }
 
-  function liveChild(id, route = { provider: 'p', model: 'a' }) {
+  function liveChild(id, route = { provider: 'p', model: 'a' }, opts = {}) {
     const agent = {
       id,
       session: {
@@ -157,6 +157,12 @@ function harness(settings = config) {
       },
       options: { provider: 'parent', model: 'parent' }
     };
+    if (opts.withModelSelect) {
+      // The host's front door (`model.select`); disk stubs and older hosts do
+      // not have one. Recorded so tests can assert the exact pushes.
+      const selects = [];
+      agent.model = { selects, select(selection) { selects.push({ ...selection }); } };
+    }
     agents.set(id, agent);
     return agent;
   }
@@ -185,7 +191,7 @@ test('the events stream opens with a hello frame and announces override writes',
 
   const before = stream.res.writes.length;
   const selected = await h.call({
-    path: '/subagent-router/select',
+    path: '/subagent-role-router/select',
     body: { childId: 'child-1', provider: 'q', model: 'b' }
   });
   assert.equal(selected.status, 200);
@@ -211,7 +217,7 @@ test('a failing SSE connection is dropped without disturbing the others', async 
   bad.res.write = () => { throw new Error('EPIPE'); };
 
   const before = good.res.writes.length;
-  await h.call({ path: '/subagent-router/select', body: { childId: 'child-2', provider: 'q', model: 'b' } });
+  await h.call({ path: '/subagent-role-router/select', body: { childId: 'child-2', provider: 'q', model: 'b' } });
   assert.equal(frames(good.res.writes.slice(before)).filter((f) => f.type === 'route').length, 1,
     'the healthy stream still received the frame');
 
@@ -220,7 +226,7 @@ test('a failing SSE connection is dropped without disturbing the others', async 
   const resurrected = [];
   bad.res.write = (chunk) => resurrected.push(chunk);
   const mid = good.res.writes.length;
-  await h.call({ path: '/subagent-router/clear', body: { childId: 'child-2' } });
+  await h.call({ path: '/subagent-role-router/clear', body: { childId: 'child-2' } });
   assert.equal(frames(resurrected).filter((f) => f.type === 'route').length, 0,
     'the dead client must be dropped from the fan-out');
   assert.equal(frames(good.res.writes.slice(mid)).filter((f) => f.type === 'route').length, 1);
@@ -230,39 +236,61 @@ test('a failing SSE connection is dropped without disturbing the others', async 
 
 test('an override applying on a request is announced once, and the failover stays silent under it', async () => {
   const h = harness();
-  const child = h.liveChild('child-3');
+  const child = h.liveChild('child-3', { provider: 'p', model: 'a' }, { withModelSelect: true });
   const stream = await h.openEvents();
-  await h.call({ path: '/subagent-router/select', body: { childId: 'child-3', provider: 'q', model: 'b' } });
 
+  // The pick is pushed through the front door the moment it is written.
+  await h.call({ path: '/subagent-role-router/select', body: { childId: 'child-3', provider: 'q', model: 'b' } });
+  assert.deepEqual(child.model.selects, [{ provider: 'q', model: 'b' }]);
+
+  // The request the child is already running keeps flowing through untouched
+  // (the host freezes the selection and throws on a differing proposal), while
+  // the lagging seed triggers one idempotent re-pick — and no announcement:
+  // the pick never landed, so there is nothing to celebrate yet.
   const seeded = { provider: 'p', model: 'a', reasoningEffort: 'max', maxTokens: 4096 };
   const mid = stream.res.writes.length;
   const after = await h.request(childPayload(child), seeded);
-  assert.equal(after.model, 'b', 'the override wins the waterfall');
+  assert.deepEqual(after, seeded);
+  assert.equal(child.model.selects.length, 2, 'the lagging seed re-picks the override');
+  assert.equal(frames(stream.res.writes.slice(mid)).filter((f) => f.type === 'route').length, 0,
+    'no announcement while the seed has not caught up');
 
-  const applied = frames(stream.res.writes.slice(mid)).filter((f) => f.type === 'route');
+  // Once the host's own seed carries the override, the applied switch is
+  // announced exactly once.
+  const landed = { provider: 'q', model: 'b', reasoningEffort: 'max', maxTokens: 4096 };
+  const tail = stream.res.writes.length;
+  const caught = await h.request(childPayload(child), landed);
+  assert.deepEqual(caught, landed);
+  const applied = frames(stream.res.writes.slice(tail)).filter((f) => f.type === 'route');
   assert.equal(applied.length, 1, 'exactly one announcement for the applied switch');
   assert.equal(applied[0].reason, 'override-applied');
   assert.equal(applied[0].childId, 'child-3');
 
   // Same seed again: a re-pick of the same route is not news.
-  const tail = stream.res.writes.length;
-  await h.request(childPayload(child), seeded);
-  assert.equal(frames(stream.res.writes.slice(tail)).filter((f) => f.type === 'route').length, 0);
+  const last = stream.res.writes.length;
+  await h.request(childPayload(child), landed);
+  assert.equal(frames(stream.res.writes.slice(last)).filter((f) => f.type === 'route').length, 0);
   stream.close();
   h.dispose();
 });
 
 test('a failover switch with no override announces itself exactly once', async () => {
   const h = harness();
-  const child = h.liveChild('child-4');
+  const child = h.liveChild('child-4', { provider: 'p', model: 'a' }, { withModelSelect: true });
   const stream = await h.openEvents();
 
-  // A timeout moves the failover cursor to the next pool entry (q/b); the
-  // next request actually switches to it and must announce that.
+  // A timeout moves the failover cursor to the next pool entry (q/b) and
+  // pushes it through the front door at once, so the NEXT step uses it.
   await h.error(child, { code: 'TIMEOUT', message: 'slow' }, { kind: 'continue' });
+  assert.deepEqual(child.model.selects, [{ provider: 'q', model: 'b' }]);
+
+  // The request the child is already running is never rewritten (the host
+  // freezes the selection): it comes back as-is, but the switch to the
+  // failover target is announced even before the seed catches up.
   const before = stream.res.writes.length;
-  const switched = await h.request(childPayload(child), { provider: 'p', model: 'a' });
-  assert.equal(switched.model, 'b');
+  const seeded = { provider: 'p', model: 'a' };
+  const switched = await h.request(childPayload(child), seeded);
+  assert.deepEqual(switched, seeded);
 
   const announce = frames(stream.res.writes.slice(before)).filter((f) => f.type === 'route');
   assert.equal(announce.length, 1);
@@ -379,7 +407,7 @@ test('the SSE singleton connects on demand, resyncs on open, and degrades after 
   const release = client.liveRouteEventsSubscribe((event) => seen.push(event));
 
   assert.equal(FakeEventSource.instances.length, 1, 'the first subscriber opens one stream');
-  assert.equal(FakeEventSource.instances[0].url, 'subagent-router/events');
+  assert.equal(FakeEventSource.instances[0].url, 'subagent-role-router/events');
   let es = FakeEventSource.instances[0];
 
   es.onopen();

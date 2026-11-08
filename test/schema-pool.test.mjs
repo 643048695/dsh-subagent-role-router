@@ -49,6 +49,11 @@ test('schema: the old single-value fields still resolve, for migration', () => {
   assert.deepEqual(read(resolved.patchModels), [])
 })
 
+test('schema: birthRoutePolicy defaults to "pool" and accepts "explicit"', () => {
+  assert.equal(read(Config({}).birthRoutePolicy), 'pool')
+  assert.equal(read(Config({ birthRoutePolicy: 'explicit' }).birthRoutePolicy), 'explicit')
+})
+
 test('resolveRolePool is exported and prefers the pool over the legacy triple', () => {
   assert.equal(typeof mod.resolveRolePool, 'function')
   const section = {

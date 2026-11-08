@@ -156,7 +156,7 @@ test("1. the entry is registered on the composer's left row, order 5", () => {
   const { ctx, slotRegistrations } = createMockContext();
   client.apply(ctx);
 
-  const entry = slotRegistrations.find((opts) => opts.id === "subagent-router-batch");
+  const entry = slotRegistrations.find((opts) => opts.id === "subagent-role-router-batch");
   assert.ok(entry, "the quick-switch entry must claim a slot");
   assert.equal(entry.name, "conversation.input.left", "it belongs on the composer's left row");
   assert.equal(entry.order, 5, "order 5 keeps it left of the widget docks");

@@ -217,7 +217,7 @@ function loadCritters() {
     uiConversation: { events: { register: () => () => {} } }
   };
   client.apply(ctx);
-  const at = slotRegistrations.findIndex((opts) => opts.id === "subagent-router-critters");
+  const at = slotRegistrations.findIndex((opts) => opts.id === "subagent-role-router-critters");
   if (at === -1) throw new Error("apply() did not register the header critters");
   const registration = slotRegistrations[at];
   const component = slotComponents[at];
@@ -326,20 +326,47 @@ function textsOf(node) {
 function stationsOf(tree) {
   const out = [];
   walk(tree, (el) => {
-    if (el.type === "span" && el.props && el.props.className === "dsm-critters-station") out.push(el);
+    if (el.type === "button" && el.props && el.props.className === "dsm-critters-station") out.push(el);
   });
   return out;
 }
 
-function buttonOf(tree) {
+function rootOf(tree) {
   let found = null;
   walk(tree, (el) => {
-    if (!found && el.type === "button" && el.props && el.props.className === "dsm-critters-btn") found = el;
+    if (!found && el.type === "span" && el.props && el.props.className === "dsm-critters") found = el;
   });
   return found;
 }
 
-const clickEvent = () => ({ preventDefault() {}, stopPropagation() {} });
+// The panel opens on hover intent now: entering the strip schedules the open
+// timer (client.critterHoverOpenMs), leaving schedules the close one. These
+// helpers drive that exact path; the old toggle button is gone.
+function fireHoverTimer(h, ms) {
+  const at = h.session.timers.findIndex((t) => t.ms === ms);
+  if (at === -1) throw new Error("no hover timer with ms=" + ms);
+  const timer = h.session.timers[at];
+  h.session.timers.splice(at, 1);
+  timer.fn();
+}
+
+function openPanelByHover(h) {
+  const root = rootOf(h.tree);
+  if (!root) throw new Error("critters root not found");
+  root.props.onMouseEnter();
+  fireHoverTimer(h, h.client.critterHoverOpenMs);
+  h.act();
+  return root;
+}
+
+function closePanelByHover(h) {
+  const root = rootOf(h.tree);
+  if (!root) throw new Error("critters root not found");
+  root.props.onMouseLeave();
+  fireHoverTimer(h, h.client.critterHoverCloseMs);
+  h.act();
+  return root;
+}
 
 const child = (parentId, extra) => Object.assign({
   running: true,
@@ -444,7 +471,7 @@ test("5. the open panel refreshes numbers from one 1s ticker only", () => {
   h.render();
   assert.equal(h.intervals.length, 0, "closed header must not start a ticker");
 
-  buttonOf(h.tree).props.onClick(clickEvent());
+  openPanelByHover(h);
   h.act();
   assert.equal(h.intervals.length, 1);
   assert.equal(h.intervals[0].ms, 1000);
@@ -454,7 +481,7 @@ test("5. the open panel refreshes numbers from one 1s ticker only", () => {
   assert.match(joined, /tokens/);
   assert.match(joined, /20\.3万|20万/);
 
-  buttonOf(openTree).props.onClick(clickEvent());
+  closePanelByHover(h);
   h.act();
   assert.equal(h.intervals.length, 0, "closing the panel must clear the ticker");
   h.unmount();
@@ -464,7 +491,7 @@ test("6. a stale metric map cannot resurrect a child that already left", () => {
   const h = loadCritters();
   h.publish({ a: child(PARENT), b: child(PARENT) });
   h.render();
-  buttonOf(h.tree).props.onClick(clickEvent());
+  openPanelByHover(h);
   h.act();
   const before = stationsOf(h.tree).length;
   h.publish({ a: child(PARENT) });
