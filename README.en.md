@@ -155,6 +155,28 @@ A new `birthRoutePolicy` setting, default `pool`:
 - **`explicit`** — the old behaviour: whatever the caller wrote is honoured.
 - **Precedence** — a switch you make in the plugin panel **always wins** (it happens after birth); agent-teams members and children matching an exemption rule are untouched. Plugins that spawn their own children with their own models (e.g. Mnemon) coexist via a name-prefix exemption rule.
 
+### Capability 11 — A context / usage stats strip on subagent pages
+
+Above the composer of a subagent conversation (and only there) sits a compact strip:
+
+- **Three numbers at a glance** — context occupancy percent with a bar, output speed (`70 tok/s`), cache hit rate and total tokens (`cache 94% 344K tokens`).
+- **Click for detail** — used and windowed context (`104K / 1M`), the system-prompt / tool-definition / message split, total elapsed time, average time to first token, output speed, cache hits, turns and steps, plus the four non-overlapping buckets (uncached input, cache read, cache write, output). Occupancy turns amber at 70% and red at 90%.
+- **All of it from projections the host already keeps** — `contextPressure`, `contextBreakdown`, `tokenUsage`, `sessionStats`. **No new endpoint, no polling**; when all four are empty nothing renders at all.
+
+> Why theme plugins cannot rescue this page: they *decorate the host's existing stats DOM*. The host pills require `input` to be defined and `activity` to be false, so when the projections never land for a subagent there is nothing to decorate. This strip is drawn by the plugin itself.
+
+### Capability 12 — One page, one model whitelist, enforced at the menu and at every entry
+
+**The problem**: the whitelist was backend-only, and only `/batch` and birth routing consulted it. On a page that allowed five models a child really did run `codex/gpt-6.1-sol`, then `gm4/gemini-4-carbon` — the host's own model seat and a direct `POST /select` both bypassed the check.
+
+**Three paths now close together**:
+
+- **The menu lists only this page's models** — trimmed by `GET /subagent-role-router/whitelist`'s `desired`: whitelist rows only, catalog order preserved, groups trimmed to nothing are dropped; the currently running model is added back and checked even when it is not on the list; whitelist routes the catalog cannot name are appended per provider (a name mismatch beats a missing row). A caption says "only this page's whitelist (N)" and a button reveals everything. A failed read or a page with no pools keeps the full menu — one failure must not empty it.
+- **An unlisted pick is switched, not refused** — `/select` substitutes the route and returns `substituted: {from, to}`; when a request seed is not on the whitelist, `setChildRoute` + `agent.model.select()` switch it (the **seed itself is returned untouched**, so the host's frozen step choice is never rewritten; the change applies from the next step). The target prefers the same provider (staying inside one gateway keeps its credentials, protocol and strengths), otherwise the page's first configured route; a page with no pools is never touched.
+- **The UI says so** — a substitution surfaces "not on this page's whitelist, switched to {model}" and remembers the route that actually took effect. One log line per (child, asked route, target route).
+
+The decision is a pure function, `pickWhitelistRoute(section, pick)`: approved → `null`, no pools → `null`, otherwise the route to use. It is unit-testable without a live session.
+
 ### Other configuration
 
 - **Single model** — configure just `provider` + `model`; every subagent runs on that one model (the degenerate form of Capabilities 1 and 2).
@@ -192,7 +214,7 @@ With no configuration the behavior is identical to not having the plugin install
 
 | Switch | Effect | Default |
 | --- | --- | --- |
-| `DSH_SUBAGENT_ROLE_ROUTER_LOG` | Point it at a **file path** and the stop fallback, `REJECT_NOT_LIVE` and `SET_OVERRIDE` append one timestamped line each. Unset, nothing is written anywhere. | unset |
+| `DSH_SUBAGENT_ROLE_ROUTER_LOG` | Point it at a **file path** and the stop fallback, `REJECT_NOT_LIVE`, `SET_OVERRIDE`, `SUBSTITUTE_WHITELIST` and `SUBSTITUTE_WHITELIST_REQUEST` append one timestamped line each. Unset, nothing is written anywhere. | unset |
 | `?srrLog=1` on the page URL, or `localStorage["dsh-subagent-role-router:log"]="1"` | Enables the client picker's and critters' debug channel (route picks, overrides, failover, navigation fallback). | off |
 | `POST /subagent-role-router/debug` | Server-side debug endpoint; it only records anything when the log variable above is set, and says so in its `logged` field. | — |
 

@@ -255,15 +255,17 @@ test("5. settings subscription & cards slots cleanup on formsCtx dispose and fib
 
   // Cards slots (3 items), the chat notice node (1), the live route picker
   // (2 surfaces: session header + composer tool row), the header critters
-  // (1 surface, pinned to the header actions row) and the batch switch entry
-  // (1 surface, composer left row) should be registered (total 8). The picker,
-  // the critters and the batch entry live on the fiber, not on the forms
+  // (1 surface, pinned to the header actions row), the batch switch entry
+  // (1 surface, composer left row) and the subagent stats strip (1 surface,
+  // composer dock) should be registered (total 9). The picker, the critters,
+  // the batch entry and the stats strip live on the fiber, not on the forms
   // scope, because they only need `slots`.
-  assert.equal(slotRegistrations.length, 8, "Settings cards, chat notice node, both live route picker surfaces, the header critters and the batch switch entry must be registered in slots");
+  assert.equal(slotRegistrations.length, 9, "Settings cards, chat notice node, both live route picker surfaces, the header critters, the batch switch entry and the subagent stats strip must be registered in slots");
   assert.deepEqual(
     slotRegistrations.map((entry) => entry.name).sort(),
     [
       "conversation.chat.node",
+      "conversation.composer.dock",
       "conversation.input.left",
       "conversation.input.right",
       "conversation.session.header.actions",
@@ -286,17 +288,18 @@ test("5. settings subscription & cards slots cleanup on formsCtx dispose and fib
   // Verify settings cards slots (3 items) were unregistered; the notice row,
   // the picker and the critters are fiber-scoped, so they must survive a
   // settings-only reload.
-  assert.equal(slotRegistrations.length, 5, "The notice row, both live route picker surfaces, the header critters and the batch switch entry must survive a formsCtx teardown");
+  assert.equal(slotRegistrations.length, 6, "The notice row, both live route picker surfaces, the header critters, the batch switch entry and the subagent stats strip must survive a formsCtx teardown");
   assert.deepEqual(
     slotRegistrations.map((entry) => entry.name).sort(),
     [
       "conversation.chat.node",
+      "conversation.composer.dock",
       "conversation.input.left",
       "conversation.input.right",
       "conversation.session.header.actions",
       "conversation.session.header.actions"
     ],
-    "Remaining slots must be the chat notice row, both live route picker surfaces, the header critters and the batch switch entry"
+    "Remaining slots must be the chat notice row, both live route picker surfaces, the header critters, the batch switch entry and the subagent stats strip"
   );
 
   // Run full fiber teardown
