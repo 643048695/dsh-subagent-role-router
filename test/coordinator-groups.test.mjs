@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   classifyCoordinatorTask,
   coordinatorAllRoutes,
@@ -286,4 +287,36 @@ test('the status view reports order, default and cooldown per route', () => {
   assert.equal(rows[0].defaulted, true);
   assert.equal(rows[0].cooling, true);
   assert.equal(rows[1].cooling, false);
+});
+
+test('getSection exposes every coordinator field (a schema field missing there is invisible)', () => {
+  // getSection() is an explicit field-by-field view of the live config. A field
+  // present in the schema but missing from that view reads as `undefined` on a
+  // real profile while every unit test built from a hand-written section object
+  // still passes — the exact way this feature first shipped "working" and empty.
+  const source = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8');
+  for (const field of [
+    'coordinatorEnabled',
+    'coordinatorPresetPrefix',
+    'coordinatorUiModels',
+    'coordinatorBackendModels',
+    'coordinatorCooldownPreset',
+    'coordinatorCooldownSteps',
+    'coordinatorCooldownCap',
+    'coordinatorNoFallback'
+  ]) {
+    assert.ok(source.includes(field + ': unwrap(raw.' + field + ')'), 'getSection must expose ' + field);
+  }
+});
+
+
+test('the two lists use the pool entry schema, not the strict one', () => {
+  // MODEL_ENTRY declares `reasoningEffort` as a REQUIRED key; a hand-written
+  // config (and the card's own save) omits it whenever no effort was picked. The
+  // array would then fail validation and silently resolve to `[]` -- the list
+  // reads as empty on a real profile while every unit test still passes. That is
+  // exactly what happened on the first live run of this feature.
+  const source = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8');
+  assert.match(source, /coordinatorUiModels: volatileField\(z\.array\(POOL_ENTRY\)/);
+  assert.match(source, /coordinatorBackendModels: volatileField\(z\.array\(POOL_ENTRY\)/);
 });
