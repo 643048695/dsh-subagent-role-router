@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { apply } from '../lib/index.js';
 import {
   childPageRoutes,
   clearCoordinatorGroup,
@@ -116,4 +117,100 @@ test('a malformed file is ignored instead of breaking the plugin', () => {
   rmSync(path, { force: true });
   assert.equal(loadCoordinatorLedger(broken), 0);
   assert.equal(broken.coordGroupOfChild.size, 0);
+});
+
+// ── the startup path, end to end ────────────────────────────────────────────
+//
+// The unit tests above prove the FILE round-trips. What the user actually hit
+// was the wiring: `apply()` must load the file BEFORE anything can judge a
+// child, and the two read endpoints must report what was restored — otherwise
+// the child's model menu falls back to the general list while the guard keeps
+// enforcing the group (the exact "one model, and it is not even mine" report).
+
+const STARTUP_CONFIG = {
+  roleMode: true,
+  models: [{ provider: 'magpie', model: 'opendesign/deepseek-v4.1-flash-eco' }],
+  injectRouteContext: false,
+  coordinatorEnabled: true,
+  coordinatorPresetPrefix: 'dsh-orchestrator-worker',
+  coordinatorUiModels: [{ provider: 'magpie-anthropic', model: 'agy-cli/gemini-4-hydrogen' }],
+  coordinatorResearchModels: [{ provider: 'magpie', model: 'group/dnq' }],
+  coordinatorBackendModels: [
+    { provider: 'magpie-responses', model: 'codex/gpt-6.2-sol' },
+    { provider: 'magpie', model: 'group/1017' }
+  ]
+};
+
+function harness(settings) {
+  const listeners = new Map();
+  const routes = [];
+  const ctx = {
+    logger: { warn() {}, info() {} },
+    on(name, fn) {
+      const list = listeners.get(name) ?? [];
+      list.push(fn);
+      listeners.set(name, list);
+      return () => {};
+    },
+    effect(fn) {
+      const off = fn();
+      return typeof off === 'function' ? off : () => {};
+    },
+    inject(names, fn) {
+      if (!names.includes('webServer')) return;
+      fn({
+        logger: ctx.logger,
+        effect(register) {
+          const off = register();
+          return typeof off === 'function' ? off : () => {};
+        },
+        webServer: {
+          register(route) {
+            routes.push(route);
+            return () => {};
+          }
+        }
+      });
+    },
+    get(key) {
+      if (key === 'agents') return { get: () => undefined };
+      return undefined;
+    }
+  };
+  apply(ctx, settings);
+  return { routes };
+}
+
+async function callGet(routes, url) {
+  const route = routes.find((entry) => entry.kind === 'prefix' && entry.path === '/subagent-role-router');
+  assert.ok(route, 'the plugin registered its endpoint');
+  const chunks = [];
+  const res = {
+    statusCode: 0,
+    writeHead(status) { this.statusCode = status; },
+    end(body) { chunks.push(body); }
+  };
+  await route.handler({
+    method: 'GET',
+    url,
+    headers: {},
+    socket: { remoteAddress: '127.0.0.1' },
+    on() {}
+  }, res);
+  return { status: res.statusCode, body: JSON.parse(chunks.join('')) };
+}
+
+test('apply() restores the ledger before anything judges a child, and the endpoints report it', async () => {
+  writeCoordinatorLedger(state({ [CHILD]: { group: 'backend', reason: 'manual', evidence: '测试', at: Date.now() } }));
+  const h = harness(STARTUP_CONFIG);
+
+  const whitelist = await callGet(h.routes, `/subagent-role-router/whitelist?childId=${CHILD}`);
+  assert.equal(whitelist.status, 200);
+  assert.equal(whitelist.body.value.coordinator.group, 'backend', 'the page knows the restored group');
+  assert.deepEqual(whitelist.body.value.desired.map((route) => route.model), ['codex/gpt-6.2-sol', 'group/1017']);
+
+  // A child with no record keeps the general answer — nothing leaked.
+  const ordinary = await callGet(h.routes, '/subagent-role-router/whitelist?childId=someone-else');
+  assert.equal(ordinary.body.value.coordinator, undefined);
+  assert.deepEqual(ordinary.body.value.desired.map((route) => route.model), ['opendesign/deepseek-v4.1-flash-eco']);
 });
