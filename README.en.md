@@ -356,20 +356,20 @@ An entry may be a `provider/model` string or the object form above; `reasoningEf
 | `exploreModels` / `planModels` / `patchModels` | array | `[]` | Capability 4 candidate queue per role. **Length = how many subagents of that role may run at once**; entries are strings or `{provider, model, reasoningEffort?}`. Empty falls back to the legacy `exploreProvider`/`exploreModel`/`exploreEffort` triple. |
 | `roleSlotCooldownSeconds` | number | `15` | Capability 4: how long a candidate that failed is skipped for new delegations. `0` disables the cooldown. |
 
-## The coordinator's two lists
+## The coordinator's three lists
 
-One plugin (dsh-orchestrator by default) dispatches every unit of work as a child session. Its work splits into **visual content** (SVG, SVG animation, UI/UX edits, generated visual code), **read-only research** (look things up, read source, compare, conclude — no file is changed) and **non-visual backend work**, which want different models. These three lists are that split, and they are **strictly isolated** from the general pools.
+One plugin (dsh-orchestrator by default) dispatches every unit of work as a child session. Its work splits into **visual content** (SVG, SVG animation, UI/UX edits, generated visual code), **read-only audit & research** (audit, inventory, health check, investigate, look things up, read source, compare, conclude — no file is changed) and **non-visual backend work**, which want different models. These three lists are that split, and they are **strictly isolated** from the general pools.
 
 - **Ordered lists.** Entry one is the default; a failure rests it for a graded wait (light 1/3/5, medium 1/5/15, heavy 2/10/30 minutes, or custom), the next entry serves meanwhile, and when the wait is over entry one is tried again. A rate limit starts one step in. "Never fall through" surfaces the first failure instead of switching.
 - **Isolation.** A route named in these lists is removed from the base pool, the three role pools and the single-model form — an ordinary subagent can never use it — and the general routes never leak into these lists. The host's global gate receives the union (it has a single list); this plugin judges every child against the list its own group owns.
-- **Classification.** A 【UI】/【查阅】/【后端】 tag in the task title wins. Without a tag: a **read-only act** in the title (audit, inventory, survey, comb-through…) with no write act is research — an audit OF the backend is still read-only; both kinds of act ("audit and fix") is backend; otherwise the title's words are scored, the body is consulted only when the title cannot decide, and the dispatcher's 【任务引用】 wrapper is stripped first; a tie or no evidence falls back to backend. Give the coordinator this convention:
+- **Classification.** A 【UI】/【查阅】/【后端】 tag in the task title wins (【审计】/【排查】/【盘点】 count as 【查阅】 too). Without a tag: a **read-only act** in the title (audit, inventory, health check, investigate, survey, verify, comb-through…) with no write act is audit & research — an audit OF the backend is still read-only; both kinds of act ("audit and fix") is backend; otherwise the title's words are scored, the body is consulted only when the title cannot decide, and the dispatcher's 【任务引用】 wrapper is stripped first; a tie or no evidence falls back to backend. Give the coordinator this convention:
 
 ```text
-Start every task title with 【UI】, 【查阅】 or 【后端】.
+Start every task title with 【UI】, 【查阅】 or 【后端】 (【审计】/【排查】/【盘点】 are accepted for 【查阅】).
 【UI】 = visual work: SVG, SVG animation, UI/UX edits, generated visual code, icons, colour, layout.
-【查阅】 = read-only research: audit, inventory, survey, look things up, read source, compare, conclude. No file is changed; dispatch it read-only.
+【查阅】 = audit & research, read-only: audit, inventory, health check, investigate, survey, look things up, read source, compare, conclude. No file is changed; dispatch it read-only.
 【后端】 = non-visual work: endpoints, data, build, scripts, performance, refactoring, bug fixes.
-Note: auditing the backend or counting stock talks about backend and business, but reads only — always 【查阅】.
+Note: auditing the backend, counting stock or investigating a production issue talks about backend and business, but reads only — always 【查阅】.
 When unsure, always 【后端】.
 ```
 

@@ -362,6 +362,20 @@ test('a read-only AUDIT stays research whatever it audits', () => {
   assert.equal(classifyCoordinatorTask('给设置页改个样式', '').group, 'ui');
 });
 
+test('the audit/research role takes its tag aliases and the wider read-only verbs', () => {
+  // 【审计】/【排查】/【盘点】 are the same list as 【查阅】: the user reads the role
+  // as "audit & research", so the tag they reach for has to work.
+  assert.equal(classifyCoordinatorTask('【审计】后端漏洞', '').group, 'research');
+  assert.equal(classifyCoordinatorTask('【排查】线上 500 的原因', '').group, 'research');
+  assert.equal(classifyCoordinatorTask('【盘点】表盘库存', '').group, 'research');
+  // The same acts without a tag also decide on their own.
+  assert.equal(classifyCoordinatorTask('排查线上报错原因', '').group, 'research');
+  assert.equal(classifyCoordinatorTask('核实订单重复的原因', '').group, 'research');
+  assert.equal(classifyCoordinatorTask('溯源这次数据错位的来源', '').group, 'research');
+  // Writing still wins over reading.
+  assert.equal(classifyCoordinatorTask('排查并修复线上报错', '').group, 'backend');
+});
+
 test('the dispatcher wrapper does not vote: 【任务引用】 is stripped first', () => {
   assert.equal(stripCoordinatorBoilerplate('【任务引用】tk-v7hb3r\n【任务详情】先调 task_detail 读完整详情。').includes('引用'), false);
   assert.equal(stripCoordinatorBoilerplate('参考资料里写了什么').includes('参考'), true);
