@@ -76,6 +76,25 @@ test('a host that renamed the method to listDescendants yields the direct childr
   h.dispose();
 });
 
+test('branch diagnostics are not mistaken for children', async () => {
+  // `listDescendants` reports an unreadable branch as a row with
+  // `kind: 'diagnostic'` and the SAME parentId as a real child. Showing it would
+  // invent a member of this conversation that never existed.
+  const service = {
+    async listDescendants(rootId) {
+      return [
+        descendant('real', rootId),
+        { kind: 'diagnostic', id: 'broken-branch', parentId: rootId, depth: 1, reason: 'corrupt' }
+      ];
+    }
+  };
+  const h = harness({ service, query: undefined });
+  const result = await strictChildrenOf(h.ctx, h.state, 'session-parent');
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value.map((row) => row.childId), ['real'], 'only real children survive');
+  h.dispose();
+});
+
 test('a host with only the old service method is unchanged', async () => {
   const service = { async listChildren(id) { return [catalogEntry('legacy-' + id)]; } };
   const h = harness({ service, query: undefined });
