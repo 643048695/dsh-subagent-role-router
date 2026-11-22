@@ -131,3 +131,18 @@ test("ensureCatalogRoute keeps the running model visible when it is off-list", (
   const again = client.ensureCatalogRoute(narrowed, "magpie", "group/dnq");
   assert.equal(again, narrowed);
 });
+
+test("routeOutsideWhitelist tells a coordinator child it left its list", () => {
+  const group = client.normalizeWhitelistRoutes([
+    { provider: "magpie-responses", model: "codex/gpt-6.2-sol" },
+    { provider: "magpie", model: "group/1017" }
+  ]);
+  // On the list: nothing to repair.
+  assert.equal(client.routeOutsideWhitelist(group, "magpie", "group/1017"), false);
+  assert.equal(client.routeOutsideWhitelist(group, "magpie-responses", "codex/gpt-6.2-sol"), false);
+  // The live mismatch: the child ran on the general list's model.
+  assert.equal(client.routeOutsideWhitelist(group, "magpie", "opendesign/deepseek-v4.1-flash-eco"), true);
+  // An empty page whitelist never declares anything "outside".
+  assert.equal(client.routeOutsideWhitelist([], "magpie", "opendesign/deepseek-v4.1-flash-eco"), false);
+  assert.equal(client.routeOutsideWhitelist(group, "", ""), false);
+});

@@ -1,6 +1,6 @@
 {
   "name": "dsh-subagent-role-router",
-  "version": "5.5.1",
+  "version": "5.6.0",
   "description": "Route DSH subagent delegations: per-role candidate pools (spillover, overflow, failure cooldowns), round-robin or random distribution, cross-provider failover, fork window slicing, agent-teams exemption, whitelist-aware birth route policy with automatic substitution of unapproved picks — plus observing and steering what is running: header critters with duration and token counts, a context/token/speed stats strip on subagent pages, a model menu that lists only the models this page allows, mid-run and batch model switching through the host's model.select gate, model-callable routing tools, SSE change push, and a stop fallback that turns a silent refusal into a visible one.",
   "keywords": [
     "deepseek-harness",

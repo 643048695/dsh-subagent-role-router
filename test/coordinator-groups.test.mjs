@@ -13,7 +13,8 @@ import {
   isCoordinatorRoute,
   noteCoordinatorFailure,
   pickCoordinatorRoute,
-  resolveRolePool
+  resolveRolePool,
+  stripCoordinatorBoilerplate
 } from '../lib/index.js';
 
 // THE SECOND PAIR OF LISTS.
@@ -337,7 +338,38 @@ test('【查阅】 marks read-only research, and research words win on their own
   assert.equal(classifyCoordinatorTask('【分析】对比两个方案', '').reason, 'tag');
   const byWords = classifyCoordinatorTask('读一下源码，梳理清楚调用链', '');
   assert.equal(byWords.group, 'research');
-  assert.match(byWords.evidence, /查阅词/);
+  // A read-only act in the title is now its own reason (see the audit test
+  // below); either way the group is research.
+  assert.ok(byWords.reason === 'readonly' || /查阅词/.test(byWords.evidence));
+});
+
+test('a read-only AUDIT stays research whatever it audits', () => {
+  // Live evidence (session-7a929cab): four parallel read-only audits were
+  // dispatched, and 「审计后端漏洞用户系统与服务器安全」 landed on the backend list
+  // on 服务/后端 while its three siblings fell to the default backend bucket —
+  // 「盘点表盘内容供给与合规缺口」 only escaped by the boilerplate 「任务引用」
+  // matching the research word 引用.
+  const backendAudit = classifyCoordinatorTask('审计后端漏洞用户系统与服务器安全', '【任务引用】tk-v7hb3r\n【任务详情】先调 task_detail 读完整详情。');
+  assert.equal(backendAudit.group, 'research');
+  assert.equal(backendAudit.reason, 'readonly');
+  assert.equal(classifyCoordinatorTask('审计App原生端稳定性与安全兼容', '').group, 'research');
+  assert.equal(classifyCoordinatorTask('盘点表盘内容供给与合规缺口', '').group, 'research');
+  assert.equal(classifyCoordinatorTask('审计App前端体验与功能竞争力', '').group, 'research');
+  // Audit AND fix is a change, not research.
+  assert.equal(classifyCoordinatorTask('审计后端漏洞并修复', '').group, 'backend');
+  assert.equal(classifyCoordinatorTask('分析并修复登录失败', '').group, 'backend');
+  // A UI edit is still a UI edit (the write act must not drag it to backend).
+  assert.equal(classifyCoordinatorTask('给设置页改个样式', '').group, 'ui');
+});
+
+test('the dispatcher wrapper does not vote: 【任务引用】 is stripped first', () => {
+  assert.equal(stripCoordinatorBoilerplate('【任务引用】tk-v7hb3r\n【任务详情】先调 task_detail 读完整详情。').includes('引用'), false);
+  assert.equal(stripCoordinatorBoilerplate('参考资料里写了什么').includes('参考'), true);
+  // Without the wrapper, 「引用」 in real content still counts as a research word.
+  assert.equal(classifyCoordinatorTask('核对引用出处', '资料里的引用要标出来').group, 'research');
+  // The title outweighs a body full of the other direction's words.
+  const verdict = classifyCoordinatorTask('修复登录超时', '顺便看看文档 源码 分析 梳理 评估 对比 研究 结论 依据 出处 引用');
+  assert.equal(verdict.group, 'backend');
 });
 
 test('all three lists reserve their routes and reach the gate', () => {
