@@ -273,6 +273,7 @@ dsh plugin add link:/path/to/dsh-subagent-role-router
 设置卡片底部有「复制这段」按钮；也可以写进协调者的偏好，让它每回合都能读到。
 
 - **运行中被拉回**：协调者子代理若实际跑在名单外的模型上（宿主模型座位、继承来的路由），从下一步起切回该组第一个可用条目；名单内的降级不会被反复弹回。
+- **分组记录会落盘**：每条「这个子代理属于哪一组」都写到本机状态目录并保留 24 小时，**插件重载不会丢**。不落盘时，重载会让运行中的协调者子代理被当成普通子代理、按通用名单改掉它的模型。停机期间出生的子代理可以用 `POST /subagent-role-router/group` 手工补判。
 - **换模型只在组内**：协调者子代理的模型菜单只列它那一组；`/select` 也用同一份组内清单判断——组外选择会在**组内**替换（同供应商优先），而不是被推到通用名单；子代理不在本组时，菜单给一行「切回」而不是多出一条组外勾选行。
 - **与豁免规则的分工**：协调者子代理在豁免规则**之前**被接管，所以即使某条豁免规则也匹配得上，它仍走这三份名单；豁免规则继续服务其它插件。
 
@@ -285,6 +286,7 @@ dsh plugin add link:/path/to/dsh-subagent-role-router
 | `GET /subagent-role-router/route?childId=` | 查一个子代理当前生效的路由（也用来确认后端跑的是哪个构建：`?childId=nothing`） |
 | `POST /subagent-role-router/select` | 给一个子代理设置模型/强度覆盖（运行中换模型走的也是这条） |
 | `POST /subagent-role-router/clear` | 清除某个子代理的覆盖 |
+| `POST /subagent-role-router/group` | 把某个子代理改判到某一组（`ui`/`research`/`backend`，空值移出名单），并立即应用该组第一条 |
 | `POST /subagent-role-router/stop` | 停止兜底：按两种 id 写法、两种授权形状重试中断子代理 |
 | `GET /subagent-role-router/events` | SSE 变更流（选路、覆盖、故障切换、成员路由），25 秒心跳 |
 | `GET /subagent-role-router/activity` | 当前对话下子代理的活跃快照 |

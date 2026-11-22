@@ -229,6 +229,7 @@ The plugin registers the prefix route `/subagent-role-router` on the loopback DS
 | `GET /subagent-role-router/route?childId=` | The route currently in effect for one subagent (also the way to confirm which build the backend runs: `?childId=nothing`) |
 | `POST /subagent-role-router/select` | Set a model/effort override for one subagent (this is also how mid-run switching works) |
 | `POST /subagent-role-router/clear` | Clear one subagent's override |
+| `POST /subagent-role-router/group` | Re-assign one subagent to a list (`ui`/`research`/`backend`; empty removes it) and apply that list's first route |
 | `POST /subagent-role-router/stop` | Stop fallback: retry the interrupt with both id spellings and both authorization shapes |
 | `GET /subagent-role-router/events` | SSE change stream (route picks, overrides, failover, member routes), 25-second heartbeat |
 | `GET /subagent-role-router/activity` | Live snapshot of the subagents in the current conversation |
@@ -376,6 +377,7 @@ If you name no group, the plugin guesses from the title keywords; when it cannot
 - **Picker inside the child's list.** On a coordinator child the model menu offers exactly its group, and `/select` judges the pick against that same list — an out-of-list pick is substituted INSIDE the group (same provider first) instead of being pushed onto the general list, and a child sitting outside its list gets a one-click "switch back" line instead of a phantom extra row.
 
 - **Runtime pull-back.** A coordinator child running off its list (host model seat, inherited route) is switched back to the group's first usable entry from its next step; a fallback already on the list is never bounced around.
+- **The decisions are persisted.** Every "this child belongs to that list" is written to the local state directory and kept for 24 hours, so a plugin reload no longer forgets it — without that, a reload turned a running coordinator child into an "ordinary" one and switched it onto the general list. A child born while the plugin was down can be re-assigned with `POST /subagent-role-router/group`.
 - **Exemptions.** Coordinator children are claimed BEFORE the exemption rules, so a matching exemption still does not apply to them; the rules keep serving other plugins.
 
 ## Platform support
