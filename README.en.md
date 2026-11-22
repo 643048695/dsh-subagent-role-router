@@ -23,18 +23,16 @@ Note this decides **which route serves the next subagent**, chosen at **delegati
 
 ### Capability 2 — Cross-provider failover: if one provider is down, run on another provider's model
 
-With `failoverEnabled` (on by default), when a subagent hits a **connection-class failure** mid-run, the plugin retries on another route from its own `models` list:
+With `failoverEnabled` (on by default), a subagent that **fails at all mid-run** retries on another route from its own `models` list (the one exception is a cancelled run — switching after a cancel would restart work the user stopped):
 
 - **Provider-agnostic** — candidates come from the whole `models` list, so failover works **across providers**. If `deepseek-official/deepseek-v4-pro` dies, the subagent can fail over to a *different vendor's* model in the list — not merely another model ID from the same vendor.
-- **Two classes of trigger code** —
-  - **Connection-class**: `RATE_LIMIT`, `QUOTA`, `SERVER`, `TIMEOUT`, `TRANSPORT`, `EMPTY_RESPONSE`.
-  - **Auth-class**: `AUTH`, `INVALID_CREDENTIAL` (HTTP 401/403 — an invalid, expired, or unauthorised key).
-  - Auth-class failures **do** switch: when each provider holds its own credentials, one bad key must not kill the whole delegation while healthy providers sit unused.
-  - **But an auth switch always emits a warning** naming the provider whose key was refused. That is deliberate: switching buys resilience, and the **log line** is what keeps the misconfiguration from being silently hidden.
-  - Other codes (e.g. `NO_ADAPTER`, `CONTEXT_WINDOW_EXCEEDED`, `IMAGE_OFFLOAD_REQUIRED`) do **not** switch: another provider would fail identically, so switching would only bury the real error.
+- **No more "known codes" allowlist** — from 5.8.0 it is a blacklist: everything except cancellation switches. A live run taught this the hard way: a gateway answered an entirely normal step with a bare "400, the request could not be completed", the old list did not recognise it, and the child stopped dead — while the same payload ran fine on another model.
+- **The switching is bounded** — each candidate is tried at most once per run, `candidates - 1` switches in total, then the real error surfaces. A genuinely broken request pays one round trip per candidate, never an endless loop.
+- **Auth-class failures switch too** — when each provider holds its own credentials, one bad key must not kill the whole delegation while healthy providers sit unused. **But an auth switch always emits a warning** naming the provider whose key was refused: switching buys resilience, and the **log line** keeps the misconfiguration from being silently hidden.
+- **The route that actually failed cools down** — never the fallback that took over. The wait comes from the configured seconds (`0` = no cooldown).
+- **The top bar says so** — the child's own transcript shows nothing (it is retried, not interrupted), so the session header shows a pill — "“model A” failed — switched to “model B”" — that disappears after 12 seconds and can be dismissed with ×. A withdrawn manual pick reads "back to …".
 - **Inherited reasoning strength is dropped** — after switching, the new provider/model is not sent the previous route's `reasoningEffort`; it resolves its own default. Otherwise a target that rejects that level can fail every request and burn through all remaining candidates.
 - **Sticky within a run** — after a switch, later steps of that same subagent stay on the new model instead of flip-flopping every step.
-- **Exhaustion passes the real error through** — once every candidate in the list has been tried, the real error surfaces; there is no infinite retry.
 - **Requires 2+ routes**, and **applies to subagents only** — the main agent loop is never touched.
 
 ### Capability 3 — Route visibility: you can see it, and so can the subagent
@@ -99,7 +97,7 @@ From 2.3.0, a subagent conversation gets a **model dropdown plus a reasoning-eff
 - **Effort changes too** — the second dropdown lists only the efforts the model itself declares (`reasoning.efforts` from the model catalog). A model that declares none gets no invented options: `sensenova/kimi-k3` declares an empty list, and forcing `high` on it makes the host answer `UNSUPPORTED_REASONING_EFFORT` and end the turn — so that dropdown stays empty for such models.
 - **Works on an idle child too** — a child that has not issued a request yet has no route to show, but the dropdown still accepts a pick; it takes effect on the next wake-up. The pick means "what the next step uses", not a persisted preference, and it is forgotten as soon as the child is disposed.
 - **↺ Reset** — after a manual pick a reset button appears; it drops the override and returns the child to whatever the plugin assigns automatically.
-- **A manual pick beats automatic failover** — once you have named a model, Capability 2 will not silently swap it away, and will not record that model in the cooldown list either. Click ↺ to hand routing back to the automatic path.
+- **A manual pick wins — until it fails, then it reverts** — once you have named a model, Capability 2 will not silently swap it away, and will not record that model in the cooldown list either. **From 5.8.0**, when the route you named really fails once, the plugin withdraws your pick and continues on the page's ordered list (the group's first usable entry on a coordinator child, preferring one that is not cooling), and the header pill says "back to …". From then on the child follows the list; pick the model again whenever you want it back.
 - **Subagents only** — the control does not appear in a main conversation's header (the host's own dropdown covers that case).
 
 > Transport: the plugin registers its own loopback-only HTTP prefix route `/subagent-role-router` and the front end fetches it by document-relative path. The full endpoint table is in [HTTP endpoints](#http-endpoints). It deliberately does not reuse the host's `/api` RPC: that channel admits exactly one interceptor, which api-gateway already holds, so claiming it would displace it.
@@ -374,7 +372,7 @@ Start by deciding which list the sub-task needs, then put the group name at the 
 If you name no group, the plugin guesses from the title keywords; when it cannot tell, it uses backend.
 ```
 
-- **Picker inside the child's list.** On a coordinator child the model menu offers exactly its group, and `/select` judges the pick against that same list — an out-of-list pick is substituted INSIDE the group (same provider first) instead of being pushed onto the general list, and a child sitting outside its list gets a one-click "switch back" line instead of a phantom extra row.
+- **Picker inside the child's list.** On a coordinator child the model menu offers exactly its group, and `/select` judges the pick against that same list — an out-of-list pick is substituted INSIDE the group (same provider first) instead of being pushed onto the general list, and a child sitting outside its list gets a one-click "switch back" line instead of a phantom extra row. A pick that fails does not stop the child either: from 5.8.0 it reverts to the group's first usable route and the header pill reports where it went.
 - **Move it from the menu.** The model menu carries a row of chips at the top — 「这一页归到」 (this page belongs to): UI / Research / Backend / no group — with the current group highlighted. A click is the same thing as calling the re-assignment endpoint by hand: the backend writes the decision, applies that group's first route immediately, and the menu refreshes onto the new list. "No group" hands the child back to ordinary handling. Success and failure are both reported in the menu, and the local view never runs ahead of the backend.
 
 - **Runtime pull-back.** A coordinator child running off its list (host model seat, inherited route) is switched back to the group's first usable entry from its next step; a fallback already on the list is never bounced around.
@@ -397,14 +395,15 @@ CI runs the same suite on `ubuntu-latest`, `windows-latest`, and `macos-latest`,
 
 ## Subagent connection-failure failover
 
-With `failoverEnabled` on (the default), when a subagent's own loop hits a connection-class failure, the plugin automatically switches models inside the `models` list and retries, following `strategy`. See [Capability 2](#capability-2--cross-provider-failover-if-one-provider-is-down-run-on-another-providers-model) above for the full account; the key points:
+With `failoverEnabled` on (the default), when a subagent's own loop hits **any failure except a cancellation**, the plugin automatically switches models inside the `models` list and retries, following `strategy`. See [Capability 2](#capability-2--cross-provider-failover-if-one-provider-is-down-run-on-another-providers-model) above for the full account; the key points:
 
 - **Cross-provider** — candidates are the whole `models` list, so it can fail over to a model from another provider, not just another model ID from the same vendor.
-- **Trigger codes** — connection-class: `RATE_LIMIT`, `QUOTA`, `SERVER`, `TIMEOUT`, `TRANSPORT`, `EMPTY_RESPONSE`; auth-class: `AUTH`, `INVALID_CREDENTIAL` (invalid/expired key — switches, with a warning). Other codes do not switch.
+- **Failure classes** — everything switches (rate limits, quota, server and transport errors, timeouts, auth failures with a warning, and opaque gateway 4xx rejections alike); only a cancelled run does not. Each candidate is tried at most once per run.
 - `round-robin`: advance to the next model in the list (the queue).
 - `random`: pick any model (without checking whether it was used before).
 - **Needs ≥ 2 models** — with fewer than 2 entries in `models`, the feature is inactive.
-- **Exhaustion passes through** — once every pool entry has been tried and failed, the real error is let through; no infinite retries.
+- **Exhaustion passes through** — once every pool/group entry has been tried and failed, the real error is let through; no infinite retries.
+- **A failed manual pick is withdrawn** — the child continues on its page's ordered list instead of stopping, and the header pill says what happened.
 - **Inherited `reasoningEffort` is dropped on switch** — the new provider/model is requested at the default reasoning strength instead of forcing the primary's strength onto a provider that may not support it.
 - **Sticky within a run** — subsequent steps of the same subagent run stay on the switched model.
 

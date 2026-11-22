@@ -49,7 +49,7 @@ git -c "http.https://github.com.proxy=http://127.0.0.1:7890" push origin main
 
 ## 四、发版前自查
 
-- [ ] `npm test` 全绿（346 项，2 项 `real-directory` 环境跳过属正常）；新增测试文件必须同步进 `scripts.test`，否则 `test/test-registry.test.mjs` 会拦
+- [ ] `npm test` 全绿（353 项，2 项 `real-directory` 环境跳过属正常）；新增测试文件必须同步进 `scripts.test`，否则 `test/test-registry.test.mjs` 会拦
 - [ ] `grep -rn "C:/Users\|/Users/" lib test tools package.json` 无命中（`test/no-hardcoded-paths.test.mjs` 也会拦）
 - [ ] `package.json` 的 `version` 与 `CHANGELOG.md` 顶部条目一致
 - [ ] 新增文件已 `git add`（CI 的 manifest job 会检查 `dsh.bundle.patch` 指向的文件存在）

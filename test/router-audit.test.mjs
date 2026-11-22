@@ -340,11 +340,19 @@ test('an unusable candidate also fails over inside its own pool',async()=>{
   assert.deepEqual(switched,{provider:'p',model:'m1'});h.dispose();
 });
 
-test('a malformed request still surfaces instead of switching candidates',async()=>{
+test('an unexplained 400 switches once, then the real error surfaces',async()=>{
+  // REVERSED ON PURPOSE (live session-7a929cab): the gateway answered a
+  // perfectly good coordinator step with a bare 400 and the child stopped dead.
+  // A subagent now moves to the next candidate on ANY failure except a
+  // cancellation; the per-run cap keeps it to one round trip per candidate, so
+  // a genuinely malformed request still surfaces (as the real error) instead of
+  // looping forever. See test/failover-revert.test.mjs for the full contract.
   const h=poolHarness({patchModels:[{provider:'p',model:'m1'},{provider:'p',model:'m2'}]});
   h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'work'}});
   const agent=subagent(h.pending[0].childId,{provider:'p',model:'m1'});
+  const retry=await h.waterfall('agent/request-error',{agent,turn:1,step:1,failure:{code:'INVALID_REQUEST',message:'messages[2].content: expected string'}},undefined);
+  assert.deepEqual(retry,{kind:'retry'});
   const sentinel={kind:'continue'};
-  const outcome=await h.waterfall('agent/request-error',{agent,turn:1,step:1,failure:{code:'INVALID_REQUEST',message:'messages[2].content: expected string'}},sentinel);
-  assert.equal(outcome,sentinel);h.dispose();
+  const surfaced=await h.waterfall('agent/request-error',{agent,turn:1,step:2,failure:{code:'INVALID_REQUEST',message:'messages[2].content: expected string'}},sentinel);
+  assert.equal(surfaced,sentinel,'the pool is exhausted after one switch, so the error must reach the user');h.dispose();
 });

@@ -255,12 +255,13 @@ test("5. settings subscription & cards slots cleanup on formsCtx dispose and fib
 
   // Cards slots (3 items), the chat notice node (1), the live route picker
   // (2 surfaces: session header + composer tool row), the header critters
-  // (1 surface, pinned to the header actions row), the batch switch entry
-  // (1 surface, composer left row) and the subagent stats strip (1 surface,
-  // composer dock) should be registered (total 9). The picker, the critters,
-  // the batch entry and the stats strip live on the fiber, not on the forms
-  // scope, because they only need `slots`.
-  assert.equal(slotRegistrations.length, 9, "Settings cards, chat notice node, both live route picker surfaces, the header critters, the batch switch entry and the subagent stats strip must be registered in slots");
+  // (1 surface, pinned to the header actions row), the failover notice pill
+  // (1 surface, the same header row), the batch switch entry (1 surface,
+  // composer left row) and the subagent stats strip (1 surface, composer dock)
+  // should be registered (total 10). The picker, the critters, the notice, the
+  // batch entry and the stats strip live on the fiber, not on the forms scope,
+  // because they only need `slots`.
+  assert.equal(slotRegistrations.length, 10, "Settings cards, chat notice node, both live route picker surfaces, the header critters, the failover notice, the batch switch entry and the subagent stats strip must be registered in slots");
   assert.deepEqual(
     slotRegistrations.map((entry) => entry.name).sort(),
     [
@@ -270,11 +271,12 @@ test("5. settings subscription & cards slots cleanup on formsCtx dispose and fib
       "conversation.input.right",
       "conversation.session.header.actions",
       "conversation.session.header.actions",
+      "conversation.session.header.actions",
       "plugins.bundle.config",
       "plugins.item",
       "plugins.row.config"
     ],
-    "every expected slot must be claimed exactly once (header.actions twice: picker + critters)"
+    "every expected slot must be claimed exactly once (header.actions three times: picker + critters + failover notice)"
   );
 
   // Verify formsCtx.effect cleanup executes without error and disposes resources
@@ -288,7 +290,7 @@ test("5. settings subscription & cards slots cleanup on formsCtx dispose and fib
   // Verify settings cards slots (3 items) were unregistered; the notice row,
   // the picker and the critters are fiber-scoped, so they must survive a
   // settings-only reload.
-  assert.equal(slotRegistrations.length, 6, "The notice row, both live route picker surfaces, the header critters, the batch switch entry and the subagent stats strip must survive a formsCtx teardown");
+  assert.equal(slotRegistrations.length, 7, "The notice row, both live route picker surfaces, the header critters, the failover notice, the batch switch entry and the subagent stats strip must survive a formsCtx teardown");
   assert.deepEqual(
     slotRegistrations.map((entry) => entry.name).sort(),
     [
@@ -297,9 +299,10 @@ test("5. settings subscription & cards slots cleanup on formsCtx dispose and fib
       "conversation.input.left",
       "conversation.input.right",
       "conversation.session.header.actions",
+      "conversation.session.header.actions",
       "conversation.session.header.actions"
     ],
-    "Remaining slots must be the chat notice row, both live route picker surfaces, the header critters, the batch switch entry and the subagent stats strip"
+    "Remaining slots must be the chat notice row, both live route picker surfaces, the header critters, the failover notice, the batch switch entry and the subagent stats strip"
   );
 
   // Run full fiber teardown
