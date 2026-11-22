@@ -106,10 +106,15 @@ function harness(overrides = {}) {
 		return subagents.startActivation({ provider: "spawn", label: request.label, request, ...specExtra });
 	}
 
-	return { config, subagents, specs, routes, get, spawn, cleanups };
+	function spawnFlat(request) {
+		// rc.3 shape: every field is top-level on the activation spec.
+		return subagents.startActivation({ provider: "spawn", ...request });
+	}
+
+	return { config, subagents, specs, routes, get, spawn, spawnFlat, cleanups };
 }
 
-const routeOf = (spec) => spec?.request?.agentOptions ?? {};
+const routeOf = (spec) => spec?.agentOptions ?? spec?.request?.agentOptions ?? {};
 
 test("a visual task is born on the first UI-list entry", async () => {
 	const h = harness();
@@ -186,4 +191,26 @@ test("a read-only research task is born on the research list", async () => {
 	const h = harness();
 	h.spawn({ prompt: "读一下源码怎么调用", label: "【查阅】读一下源码", parent: { id: "session-p" } }, { agentPreset: "dsh-orchestrator-worker" });
 	assert.equal(routeOf(h.specs[0]).model, "research-a");
+});
+
+test("a FLAT activation spec is routed at birth (rc.3 puts every field on the spec)", async () => {
+	const h = harness();
+	// No `request` wrapper at all: this is what the host's startActivation really
+	// receives on rc.3, and what dsh-orchestrator sends.
+	h.spawnFlat({
+		label: "【UI】画个图标",
+		prompt: "画个图标",
+		parent: { id: "session-p" },
+		agentPreset: "dsh-orchestrator-worker"
+	});
+	const spec = h.specs[0];
+	assert.equal(spec.request, void 0, "the spec carries no nested request");
+	assert.equal(spec.agentOptions && spec.agentOptions.model, "ui-a", "the birth route lands on the spec itself");
+});
+
+test("a flat spec from an ordinary child gets the general route at birth too", async () => {
+	const h = harness();
+	h.spawnFlat({ label: "随便做点什么", prompt: "随便做点什么", parent: { id: "session-p" } });
+	const spec = h.specs[0];
+	assert.equal(spec.agentOptions && spec.agentOptions.model, "general-a");
 });

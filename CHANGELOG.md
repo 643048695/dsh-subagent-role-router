@@ -4,6 +4,25 @@
 
 **本项目是 [dingminhua/dsh-subagent-default-model](https://github.com/dingminhua/dsh-subagent-default-model)（MIT，Copyright (c) 2026 LaoDing）的衍生作品。** 3.0.0 之前的条目由原作撰写，其中的功能、修复与测试记录均属原作工作；本项目的改动从 **3.0.0** 起记录。
 
+## 5.5.1 (2026-11-23)
+
+真机复查抓到的根因：**宿主 rc.3 的激活规格是扁平的，插件却只认带 `request` 包装的旧形状**——协调者派出的子代理因此在出生选路这一步被整个跳过。
+
+### Fixed
+
+- **扁平激活规格（`startActivation` / `startContinuable`）现在会被正确读取。** rc.3 的 `SubagentActivationSpec` 继承 `SubagentStartRequest`：`label`、`parent`、`prompt`、`agentPreset`、`agentOptions` 全是顶层字段，没有 `spec.request`。旧代码取 `spec.request` 得到 `undefined`，于是出生分流、角色池、协调者名单、豁免规则全部静默跳过，子代理只能落到「请求阶段的白名单纠正」——也就是先按父会话模型起跑、下一步才被换成通用名单的模型。真机证据：协调者派出的任务子会话，其描述里的出生模型是父会话那条，最终选择才是通用池模型，且分组记录为空。
+- **两种形状都被支持。** 旧宿主的 `{ request }` 包装仍然可用（`writeRequest` 按进来的形状写回），不会为了修新形状而破坏旧行为。
+- **活动台账的请求字段改为两种形状都读**（`args[0].request ?? args[0]`）。
+
+### Added
+
+- `test/coordinator-live.test.mjs` 增加两个扁平规格用例：协调者子代理按标签落到 UI 名单、普通子代理落到通用名单；原有的嵌套形状用例继续通过。
+
+### Notes
+
+- 构建标记：`ROUTER_BUILD` = `2026-11-22.8`。
+- 测试 **323 项：321 通过 / 0 失败 / 2 跳过**。
+
 ## 5.5.0 (2026-11-22)
 
 给协调者加第三个角色：**查阅分析**——只查、只读、只出结论，不动手改任何东西。
