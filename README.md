@@ -236,6 +236,9 @@ dsh plugin add link:/path/to/dsh-subagent-role-router
 
 装好后在 `设置 → 插件配置 → 子代理路由` 里配置路由；不配置时行为与没装插件一致。
 
+> **条目名别写成别名（实测过一次）**：宿主是按**包名**把 `cordis.patch.yml` 里那一条的 `config` 绑到插件上的。条目写成 `dsh-subagent-router` 这类别名时，插件照样加载、界面也在，但拿到的是 schema 默认值——模型池、白名单、角色池全部静默失效，症状是 `GET /subagent-role-router/whitelist` 里 `desired` 为空、`outcome.reason` 为 `no-models`。条目的 `id` 与 `name` 都写包名 `dsh-subagent-role-router`。
+
+
 ## 配置参数
 
 插件配置即 `cordis.patch.yml` 里 `dsh-subagent-role-router` 条目的 `config` 段；设置面板会写出同一份配置。字段说明见下方「配置」一节。

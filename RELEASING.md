@@ -61,7 +61,7 @@ git -c "http.https://github.com.proxy=http://127.0.0.1:7890" push origin main
 
 ## 六、装错版本时怎么回退
 
-插件装在 `~/.dsh/profiles/desktop/plugins/dsh-subagent-role-router/`（开发时可能是 `link:`）。改坏了的处理顺序：
+插件装在 `~/.dsh/profiles/desktop/plugins/dsh-subagent-router/`（开发时可能是 `link:`），profile 的 `package.json` 与 `cordis.patch.yml` 里的名字都必须是包名 `dsh-subagent-role-router`：宿主按包名绑定那一条的 `config`，写成 `dsh-subagent-router` 这类别名时插件能加载但配置静默回默认值（`/whitelist` 的 `desired` 为空）。改坏了的处理顺序：
 
 1. `git -C <仓库> checkout vX.Y.Z` 回到上一个 tag，重装；
 2. 客户端改动只需重载：往 `~/.dsh/profiles/desktop/cordis.patch.yml` 追加一行 `#` 注释，几十秒后看 `~/.dsh/live-route-debug.log` 出现 `CLIENT_BUNDLE_LOADED`；
