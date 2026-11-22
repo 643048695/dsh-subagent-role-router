@@ -255,14 +255,14 @@ dsh plugin add link:/path/to/dsh-subagent-role-router
 
 ## 协调者子代理的两份名单
 
-一个插件（默认 `dsh-orchestrator`）会把每个需求拆成子任务派出去。这些子任务的活分两种，值得用不同的模型：**视觉内容**（画 SVG、SVG 动画、改 UI/UX、生成视觉代码）和**非视觉的底层改动**。这份配置给它们两张自己的名单，并且与通用名单**严格隔离**。
+一个插件（默认 `dsh-orchestrator`）会把每个需求拆成子任务派出去。这些子任务的活分三种，值得用不同的模型：**视觉内容**（画 SVG、SVG 动画、改 UI/UX、生成视觉代码）、**只读的查阅分析**（查资料、读源码、做对比、出结论，不改任何文件）和**非视觉的底层改动**。这份配置给它们三张自己的名单，并且与通用名单**严格隔离**。
 
 - **有序清单**：每份名单第一个是默认；第一个失败后按梯度休息（轻 1/3/5、中 1/5/15、重 2/10/30 分钟，或自定义），休息期间下一个接手；休息期满回到第一个。被限流时从第二档起步。可以开「不自动顺延」：第一个失败就直接报错。
 - **隔离**：被这两份名单占用的模型，会从基础池、三个角色池、单模型形式里全部剔除，普通子代理永远选不到；通用名单的模型也不进这两组。宿主的全局闸门收到的是并集（宿主只有一份），每个子代理准用哪一份由本插件逐条判断。
 - **分流**：标题写了【UI】/【后端】就按标签；没标签时按视觉词与后端词打分；打平或无线索归后端。协调者是另一个插件的 agent，给它一段约定即可：
 
 ```text
-派活时，任务标题必须以【UI】或【后端】开头。
+派活时，任务标题必须以【UI】【查阅】或【后端】开头。
 【UI】= 视觉内容：画 SVG、SVG 动画、修改 UI/UX、生成视觉代码、图标、配色、排版。
 【后端】= 与视觉无关的底层改动：接口、数据库、构建、脚本、性能、重构。
 拿不准一律写【后端】。
@@ -425,7 +425,7 @@ CI 在 `ubuntu-latest`、`windows-latest`、`macos-latest` 三个平台上同时
 | `roleSlotCooldownSeconds` | number | `15` | 功能四：候选失败后暂停多少秒不再用于新派发。`0` 表示关闭冷却。 |
 | `coordinatorEnabled` | boolean | `true` | 协调者子代理的两份独立名单总开关。关掉后这两份名单不生效，其模型也回到通用池。 |
 | `coordinatorPresetPrefix` | string | `dsh-orchestrator-worker` | 用房这个前缀认出「协调者派出的子代理」；换插件或改预设名时才需要动。 |
-| `coordinatorUiModels` / `coordinatorBackendModels` | array | `[]` | 两份有序名单（视觉 / 后端）。第一个是默认，失败按梯度休息后顺延，期满回切第一个。被占用的模型会从通用名单里剔除。 |
+| `coordinatorUiModels` / `coordinatorResearchModels` / `coordinatorBackendModels` | array | `[]` | 三份有序名单（视觉 / 只读调研 / 后端）。第一个是默认，失败按梯度休息后顺延，期满回切第一个。被占用的模型会从通用名单里剔除。 |
 | `coordinatorCooldownPreset` | string | `medium` | 失败休息梯度：`light` 1/3/5、`medium` 1/5/15、`heavy` 2/10/30 分钟，`custom` 走下面两项。 |
 | `coordinatorCooldownSteps` / `coordinatorCooldownCap` | array / number | `[]` / `0` | `custom` 时的梯度分钟数与封顶。 |
 | `coordinatorNoFallback` | boolean | `false` | 勾上后第一个失败直接报错，不自动顺延。 |

@@ -128,6 +128,7 @@ test('the save path writes every coordinator field', () => {
     'coordinatorPresetPrefix',
     'coordinatorUiModels',
     'coordinatorBackendModels',
+    'coordinatorResearchModels',
     'coordinatorCooldownPreset',
     'coordinatorCooldownSteps',
     'coordinatorCooldownCap',
@@ -144,4 +145,9 @@ test('the picker asks about this page so a coordinator child sees its own list',
     'the whitelist request must carry the page session id'
   );
   assert.ok(clientSource.includes('value.coordinator'), 'the picker must read the coordinator answer');
+});
+
+test('the research list round-trips like the other two', () => {
+  const rows = api.normalizeCoordinatorRoutes({ coordinatorResearchModels: [{ provider: 'magpie', model: 'r-a' }] }, 'research');
+  assert.deepEqual(plain(rows), [{ provider: 'magpie', model: 'r-a', reasoningEffort: '' }]);
 });

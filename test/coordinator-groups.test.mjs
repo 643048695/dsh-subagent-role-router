@@ -61,6 +61,7 @@ function section(extra = {}) {
       { provider: 'magpie', model: 'ui-model-a' },
       { provider: 'magpie', model: 'ui-model-b' }
     ],
+    coordinatorResearchModels: [{ provider: 'magpie', model: 'research-a' }],
     coordinatorBackendModels: [{ provider: 'magpie', model: 'be-model-a' }],
     coordinatorCooldownPreset: 'medium',
     coordinatorCooldownSteps: [],
@@ -154,7 +155,7 @@ test('isCoordinatorRoute answers exactly for the two lists', () => {
   assert.equal(isCoordinatorRoute(live, { provider: 'magpie', model: 'group/dnq' }), false);
 });
 
-test('both lists resolve in page order, deduped', () => {
+test('the three lists resolve in page order, deduped', () => {
   const live = section({
     coordinatorUiModels: [
       { provider: 'magpie', model: 'a' },
@@ -163,7 +164,7 @@ test('both lists resolve in page order, deduped', () => {
     ]
   });
   assert.deepEqual(coordinatorGroupRoutes(live, 'ui').map((route) => route.model), ['a', 'b']);
-  assert.deepEqual(coordinatorAllRoutes(live).map((route) => route.model), ['a', 'b', 'be-model-a']);
+  assert.deepEqual(coordinatorAllRoutes(live).map((route) => route.model), ['a', 'b', 'research-a', 'be-model-a']);
 });
 
 // ── 3. order, cooldown gradient, return to the first ─────────────────────────
@@ -272,7 +273,7 @@ test('switching the feature off leaves everything to the general lists', () => {
 });
 
 test('an empty reservation makes the general list whole again', () => {
-  const live = section({ coordinatorUiModels: [], coordinatorBackendModels: [] });
+  const live = section({ coordinatorUiModels: [], coordinatorResearchModels: [], coordinatorBackendModels: [] });
   const general = hostWhitelistModels(live).map((route) => route.model);
   assert.ok(general.includes('group/dnq'));
   assert.equal(hostGateModels(live).length, general.length);
@@ -329,4 +330,22 @@ test('a preset named on the SPEC is recognised (rc.3 spells it flat)', () => {
   assert.equal(viaSpec.group, 'ui');
   const viaRequest = coordinatorGroupForBirth(st, { label: '【UI】画个图' }, { agentPreset: 'dsh-orchestrator-worker' });
   assert.equal(viaRequest.group, 'ui');
+});
+
+test('【查阅】 marks read-only research, and research words win on their own', () => {
+  assert.equal(classifyCoordinatorTask('【查阅】这个接口怎么工作的', '').group, 'research');
+  assert.equal(classifyCoordinatorTask('【分析】对比两个方案', '').reason, 'tag');
+  const byWords = classifyCoordinatorTask('读一下源码，梳理清楚调用链', '');
+  assert.equal(byWords.group, 'research');
+  assert.match(byWords.evidence, /查阅词/);
+});
+
+test('all three lists reserve their routes and reach the gate', () => {
+  const live = section();
+  const general = hostWhitelistModels(live).map((route) => route.model);
+  assert.ok(!general.includes('research-a'), 'a research-list route is not offered to ordinary children');
+  const gate = hostGateModels(live).map((route) => route.model);
+  assert.ok(gate.includes('research-a'), 'the host gate approves it for the coordinator child');
+  assert.deepEqual(coordinatorGroupRoutes(live, 'research').map((route) => route.model), ['research-a']);
+  assert.equal(isCoordinatorRoute(live, { provider: 'magpie', model: 'research-a' }), true);
 });

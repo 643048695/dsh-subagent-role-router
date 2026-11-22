@@ -28,6 +28,7 @@ function harness(overrides = {}) {
 			{ provider: "magpie", model: "ui-a" },
 			{ provider: "magpie", model: "ui-b" }
 		],
+		coordinatorResearchModels: [{ provider: "magpie", model: "research-a" }],
 		coordinatorBackendModels: [{ provider: "magpie", model: "be-a" }],
 		coordinatorCooldownPreset: "medium",
 		coordinatorCooldownSteps: [],
@@ -129,7 +130,7 @@ test("an ordinary spawn stays on the general list and cannot borrow a reserved r
 	assert.equal(picked.model, "general-a", "reserved routes are removed from the general pool");
 });
 
-test("the diagnostic endpoint reports both lists, the reserved set and what is left", async () => {
+test("the diagnostic endpoint reports all three lists, the reserved set and what is left", async () => {
 	const h = harness();
 	const answer = await h.get("/subagent-role-router/coordinator");
 	assert.equal(answer.status, 200);
@@ -137,8 +138,9 @@ test("the diagnostic endpoint reports both lists, the reserved set and what is l
 	assert.deepEqual(answer.body.value.groups.ui.routes.map((row) => row.model), ["ui-a", "ui-b"]);
 	assert.equal(answer.body.value.groups.ui.routes[0].defaulted, true);
 	assert.deepEqual(answer.body.value.groups.backend.routes.map((row) => row.model), ["be-a"]);
+	assert.deepEqual(answer.body.value.groups.research.routes.map((row) => row.model), ["research-a"]);
 	assert.deepEqual(answer.body.value.general.map((row) => row.model), ["general-a"], "the general list keeps only unreserved routes");
-	assert.deepEqual(answer.body.value.gate.map((row) => row.model).sort(), ["be-a", "general-a", "ui-a", "ui-b"], "the host gate receives the union");
+	assert.deepEqual(answer.body.value.gate.map((row) => row.model).sort(), ["be-a", "general-a", "research-a", "ui-a", "ui-b"], "the host gate receives the union");
 });
 
 test("a coordinator child's page is offered its own list, an ordinary page the general one", async () => {
@@ -179,4 +181,9 @@ test("a preset on the spec (the rc.3 shape) is what the orchestrator actually se
 	// dsh-orchestrator puts agentPreset on the activation SPEC, not in the request.
 	h.spawn({ prompt: "画个图标", label: "【UI】画个图标", parent: { id: "session-p" } }, { agentPreset: "dsh-orchestrator-worker" });
 	assert.equal(routeOf(h.specs[0]).model, "ui-a");
+});
+test("a read-only research task is born on the research list", async () => {
+	const h = harness();
+	h.spawn({ prompt: "读一下源码怎么调用", label: "【查阅】读一下源码", parent: { id: "session-p" } }, { agentPreset: "dsh-orchestrator-worker" });
+	assert.equal(routeOf(h.specs[0]).model, "research-a");
 });

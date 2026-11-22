@@ -358,15 +358,16 @@ An entry may be a `provider/model` string or the object form above; `reasoningEf
 
 ## The coordinator's two lists
 
-One plugin (dsh-orchestrator by default) dispatches every unit of work as a child session. Its work splits into **visual content** (SVG, SVG animation, UI/UX edits, generated visual code) and **non-visual backend work**, which want different models. These two lists are that split, and they are **strictly isolated** from the general pools.
+One plugin (dsh-orchestrator by default) dispatches every unit of work as a child session. Its work splits into **visual content** (SVG, SVG animation, UI/UX edits, generated visual code), **read-only research** (look things up, read source, compare, conclude — no file is changed) and **non-visual backend work**, which want different models. These three lists are that split, and they are **strictly isolated** from the general pools.
 
 - **Ordered lists.** Entry one is the default; a failure rests it for a graded wait (light 1/3/5, medium 1/5/15, heavy 2/10/30 minutes, or custom), the next entry serves meanwhile, and when the wait is over entry one is tried again. A rate limit starts one step in. "Never fall through" surfaces the first failure instead of switching.
 - **Isolation.** A route named in these lists is removed from the base pool, the three role pools and the single-model form — an ordinary subagent can never use it — and the general routes never leak into these lists. The host's global gate receives the union (it has a single list); this plugin judges every child against the list its own group owns.
 - **Classification.** A 【UI】/【后端】 tag in the task title wins; without a tag the visual and backend words are scored; a tie or no evidence falls back to backend. Give the coordinator this convention:
 
 ```text
-Start every task title with 【UI】 or 【后端】.
+Start every task title with 【UI】, 【查阅】 or 【后端】.
 【UI】 = visual work: SVG, SVG animation, UI/UX edits, generated visual code, icons, colour, layout.
+【查阅】 = read-only research: look things up, read source, compare, conclude. No file is changed; dispatch it read-only.
 【后端】 = non-visual work: endpoints, data, build, scripts, performance, refactoring.
 When unsure, always 【后端】.
 ```
