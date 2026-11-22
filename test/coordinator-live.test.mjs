@@ -101,8 +101,8 @@ function harness(overrides = {}) {
 		return captured;
 	}
 
-	function spawn(request) {
-		return subagents.startActivation({ provider: "spawn", label: request.label, request });
+	function spawn(request, specExtra = {}) {
+		return subagents.startActivation({ provider: "spawn", label: request.label, request, ...specExtra });
 	}
 
 	return { config, subagents, specs, routes, get, spawn, cleanups };
@@ -172,4 +172,11 @@ test("switching the feature off returns the general routing", async () => {
 	assert.equal(routeOf(h.specs[0]).model, "general-a");
 	const answer = await h.get("/subagent-role-router/coordinator");
 	assert.equal(answer.body.value.enabled, false);
+});
+
+test("a preset on the spec (the rc.3 shape) is what the orchestrator actually sends", async () => {
+	const h = harness();
+	// dsh-orchestrator puts agentPreset on the activation SPEC, not in the request.
+	h.spawn({ prompt: "画个图标", label: "【UI】画个图标", parent: { id: "session-p" } }, { agentPreset: "dsh-orchestrator-worker" });
+	assert.equal(routeOf(h.specs[0]).model, "ui-a");
 });

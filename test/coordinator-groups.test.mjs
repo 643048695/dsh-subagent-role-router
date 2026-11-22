@@ -320,3 +320,13 @@ test('the two lists use the pool entry schema, not the strict one', () => {
   assert.match(source, /coordinatorUiModels: volatileField\(z\.array\(POOL_ENTRY\)/);
   assert.match(source, /coordinatorBackendModels: volatileField\(z\.array\(POOL_ENTRY\)/);
 });
+test('a preset named on the SPEC is recognised (rc.3 spells it flat)', () => {
+  // dsh-orchestrator passes `agentPreset` as a flat spec field, not inside the
+  // request. Reading only request.agentPreset made every one of its children
+  // look ordinary — the lists would load, never match, and silently do nothing.
+  const st = state();
+  const viaSpec = coordinatorGroupForBirth(st, { label: '【UI】画个图', agentPreset: 'dsh-orchestrator-worker' }, { cwd: '/tmp/x' });
+  assert.equal(viaSpec.group, 'ui');
+  const viaRequest = coordinatorGroupForBirth(st, { label: '【UI】画个图' }, { agentPreset: 'dsh-orchestrator-worker' });
+  assert.equal(viaRequest.group, 'ui');
+});
