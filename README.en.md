@@ -287,7 +287,7 @@ A wrong ceiling does not degrade gracefully: `loadProfileDirectory()` throws for
 
 ## Configuration
 
-Use the Web settings card (**Settings → Plugins → Subagent default model (dsh-subagent-role-router)**).
+Use the Web settings card (**Settings → Plugins → Subagent default model (dsh-subagent-role-router)**). It is built for a narrow pane: one card per concern, collapsed by default, and opening one expands only that item; the coordinator's three lists are **a single entry** with the three lists behind tabs. At sidebar width each row switches to two stacked lines so the badge stays right and the action buttons are never pushed out.
 
 You can also edit the profile patch `~/.dsh/profiles/<profile>/cordis.patch.yml` directly: since DSH 0.1.7 that is where settings live, keyed by this plugin's Loader entry id `dsh-subagent-role-router`:
 
@@ -375,6 +375,7 @@ If you name no group, the plugin guesses from the title keywords; when it cannot
 ```
 
 - **Picker inside the child's list.** On a coordinator child the model menu offers exactly its group, and `/select` judges the pick against that same list — an out-of-list pick is substituted INSIDE the group (same provider first) instead of being pushed onto the general list, and a child sitting outside its list gets a one-click "switch back" line instead of a phantom extra row.
+- **Move it from the menu.** The model menu carries a row of chips at the top — 「这一页归到」 (this page belongs to): UI / Research / Backend / no group — with the current group highlighted. A click is the same thing as calling the re-assignment endpoint by hand: the backend writes the decision, applies that group's first route immediately, and the menu refreshes onto the new list. "No group" hands the child back to ordinary handling. Success and failure are both reported in the menu, and the local view never runs ahead of the backend.
 
 - **Runtime pull-back.** A coordinator child running off its list (host model seat, inherited route) is switched back to the group's first usable entry from its next step; a fallback already on the list is never bounced around.
 - **The decisions are persisted.** Every "this child belongs to that list" is written to the local state directory and kept for 24 hours, so a plugin reload no longer forgets it — without that, a reload turned a running coordinator child into an "ordinary" one and switched it onto the general list. A child born while the plugin was down can be re-assigned with `POST /subagent-role-router/group`.
