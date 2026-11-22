@@ -416,7 +416,7 @@ semver.satisfies(runtimeVersion, range, { includePrerelease: true })
 - **依赖树**：`package-lock.json` 同时锁定 Windows 三套可选原生构建（`win32-x64-msvc`、`win32-arm64-msvc`、`win32-ia32-msvc`），npm 只安装与当前平台匹配的那一个；本插件的直接依赖 `@deepseek-ai/schemastery` 是纯 JS。
 - **换行符**：仓库未固定 `core.autocrlf`，Windows 检出可能得到 CRLF 源码。全部测试已在该形态下验证通过——解析源码的断言都基于子串而非行尾，因此 CRLF/LF 不影响结果。
 - **路径解析**：仓库脚本统一用 `fileURLToPath` 而非 `URL.pathname`。后者在 Windows 上会得到 `/C:/...` 并被 `path.join` 折成不存在的 `\C:\...`，属于只会在 Windows 上暴露的硬故障。
-- **测试发现**：`npm test` 直接调用 `node --test`（不带 glob），由 Node 测试运行器自行发现用例，不依赖 shell 展开——`test/*.test.mjs` 这类 glob 在 POSIX sh 下会展开、在 cmd/PowerShell 下会原样传入，行为不一致。
+- **测试发现**：`npm test` 显式列出每一个测试文件，既不用目录、也不用 glob。原因是两头都会踩坑：`test/` 目录写法在 Node 20/22 会把目录当模块加载、报「找不到模块」；`test/*.test.mjs` 这种 glob 只有 Node 22 自带的测试运行器会展开，Node 20 和 cmd/PowerShell 会把它原样传进去，直接「Could not find」。怕漏登记就再加一条测试（`test/test-registry.test.mjs`）盯着：文件在盘上而没进脚本就红，脚本里写了不存在的文件也红。新增测试文件记得同步进 `scripts.test`。
 
 CI 在 `ubuntu-latest`、`windows-latest`、`macos-latest` 三个平台上同时运行同一套测试，因此上述约定有持续验证而非一次性声明。
 

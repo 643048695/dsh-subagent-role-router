@@ -49,7 +49,7 @@ git -c "http.https://github.com.proxy=http://127.0.0.1:7890" push origin main
 
 ## 四、发版前自查
 
-- [ ] `npm test` 全绿（232 项，2 项 `real-directory` 环境跳过属正常）
+- [ ] `npm test` 全绿（346 项，2 项 `real-directory` 环境跳过属正常）；新增测试文件必须同步进 `scripts.test`，否则 `test/test-registry.test.mjs` 会拦
 - [ ] `grep -rn "C:/Users\|/Users/" lib test tools package.json` 无命中（`test/no-hardcoded-paths.test.mjs` 也会拦）
 - [ ] `package.json` 的 `version` 与 `CHANGELOG.md` 顶部条目一致
 - [ ] 新增文件已 `git add`（CI 的 manifest job 会检查 `dsh.bundle.patch` 指向的文件存在）
@@ -64,5 +64,5 @@ git -c "http.https://github.com.proxy=http://127.0.0.1:7890" push origin main
 插件装在 `~/.dsh/profiles/desktop/plugins/dsh-subagent-router/`（开发时可能是 `link:`），profile 的 `package.json` 与 `cordis.patch.yml` 里的名字都必须是包名 `dsh-subagent-role-router`：宿主按包名绑定那一条的 `config`，写成 `dsh-subagent-router` 这类别名时插件能加载但配置静默回默认值（`/whitelist` 的 `desired` 为空）。改坏了的处理顺序：
 
 1. `git -C <仓库> checkout vX.Y.Z` 回到上一个 tag，重装；
-2. 客户端改动只需重载：往 `~/.dsh/profiles/desktop/cordis.patch.yml` 追加一行 `#` 注释，几十秒后看 `~/.dsh/live-route-debug.log` 出现 `CLIENT_BUNDLE_LOADED`；
+2. 改完前端或后端都要**重启应用**才生效：往 `~/.dsh/profiles/desktop/cordis.patch.yml` 追加注释**不会**让宿主重新挂载插件（注释不改变解析后的配置，实测无效，别再试）；重启后看 `~/.dsh/live-route-debug.log` 是否出现 `CLIENT_BUNDLE_LOADED`。
 3. 后端（`lib/index.js`）有改动时，重载会清掉内存中的模型覆盖，先确认这不影响你手头的会话。
