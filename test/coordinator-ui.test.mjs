@@ -151,3 +151,24 @@ test('the research list round-trips like the other two', () => {
   const rows = api.normalizeCoordinatorRoutes({ coordinatorResearchModels: [{ provider: 'magpie', model: 'r-a' }] }, 'research');
   assert.deepEqual(plain(rows), [{ provider: 'magpie', model: 'r-a', reasoningEffort: '' }]);
 });
+// ── "move this page to another group" ───────────────────────────────────
+//
+// The control posts to /subagent-role-router/group and then re-reads the
+// whitelist, so the menu follows the new list instead of staying on the old
+// one. It must only exist for a page that already belongs to a group: an
+// ordinary subagent keeps a clean menu.
+test('the menu can move this page to another group, and only offers it to group children', () => {
+  assert.match(clientSource, /subagent-role-router\/group/);
+  assert.match(clientSource, /childId: sessionId, group: next/);
+  assert.match(clientSource, /"content-type": "application\/json"/);
+  assert.match(clientSource, /coordinatorInfo === null \|\| coordinatorInfo === void 0 \? null : React\.createElement\("div", \{/);
+  assert.match(clientSource, /function \(\) \{ if \(!active\) moveToGroup\(choice\.id\); \}/);
+});
+
+test('the group control is labelled in both locales', () => {
+  const zh = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8');
+  for (const key of ['live.groupLabel', 'live.groupUi', 'live.groupResearch', 'live.groupBackend', 'live.groupNone', 'live.groupApplied', 'live.groupFailed']) {
+    const hits = zh.split('"' + key + '":').length - 1;
+    assert.equal(hits, 2, key + ' should exist once per locale');
+  }
+});
