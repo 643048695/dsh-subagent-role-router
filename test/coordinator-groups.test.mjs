@@ -343,6 +343,27 @@ test('【查阅】 marks read-only research, and research words win on their own
   assert.ok(byWords.reason === 'readonly' || /查阅词/.test(byWords.evidence));
 });
 
+test('the coordinator can name the group itself, and that beats every rule', () => {
+  const named = classifyCoordinatorTask('【组：审计查阅】表盘工坊 5.97 整改计划', '');
+  assert.equal(named.group, 'research');
+  assert.equal(named.reason, 'directive');
+  // A directive in the DESCRIPTION works too, even against a backend-heavy title.
+  const inBody = classifyCoordinatorTask('修复登录超时', '组：审计查阅\n只看不改，别动代码');
+  assert.equal(inBody.group, 'research');
+  assert.equal(inBody.reason, 'directive');
+  // Natural phrasing: 「交给审计组」.
+  assert.equal(classifyCoordinatorTask('看后端权限配置', '这块交给审计组处理').group, 'research');
+  // English form, and the label form the settings page teaches.
+  assert.equal(classifyCoordinatorTask('Check the release notes', 'group: backend').group, 'backend');
+  assert.equal(classifyCoordinatorTask('整理发布说明', '组：UI 绘制').group, 'ui');
+  // A directive outranks a tag written earlier: the coordinator's later, more
+  // specific word is the decision.
+  assert.equal(classifyCoordinatorTask('【UI】看下配色', '组：后端处理').group, 'backend');
+  // No directive: the rules still decide, exactly as before.
+  assert.equal(classifyCoordinatorTask('修复登录超时', '').group, 'backend');
+  assert.equal(classifyCoordinatorTask('审计后端漏洞', '').group, 'research');
+});
+
 test('a read-only AUDIT stays research whatever it audits', () => {
   // Live evidence (session-7a929cab): four parallel read-only audits were
   // dispatched, and 「审计后端漏洞用户系统与服务器安全」 landed on the backend list

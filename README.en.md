@@ -362,15 +362,15 @@ One plugin (dsh-orchestrator by default) dispatches every unit of work as a chil
 
 - **Ordered lists.** Entry one is the default; a failure rests it for a graded wait (light 1/3/5, medium 1/5/15, heavy 2/10/30 minutes, or custom), the next entry serves meanwhile, and when the wait is over entry one is tried again. A rate limit starts one step in. "Never fall through" surfaces the first failure instead of switching.
 - **Isolation.** A route named in these lists is removed from the base pool, the three role pools and the single-model form — an ordinary subagent can never use it — and the general routes never leak into these lists. The host's global gate receives the union (it has a single list); this plugin judges every child against the list its own group owns.
-- **Classification.** A 【UI】/【查阅】/【后端】 tag in the task title wins (【审计】/【排查】/【盘点】 count as 【查阅】 too). Without a tag: a **read-only act** in the title (audit, inventory, health check, investigate, survey, verify, comb-through…) with no write act is audit & research — an audit OF the backend is still read-only; both kinds of act ("audit and fix") is backend; otherwise the title's words are scored, the body is consulted only when the title cannot decide, and the dispatcher's 【任务引用】 wrapper is stripped first; a tie or no evidence falls back to backend. Give the coordinator this convention:
+- **Classification: the coordinator names the group, the plugin only guesses when it does not.** The coordinator is the party that knows what a unit of work is FOR, so it can say so outright — 「组：审计查阅」 in the title or the task description, 【组：后端】, `group: research`, 「交给审计组」 — and **that is the answer; tags and keywords stand down**. Only when it says nothing: a 【UI】/【审计】【排查】【盘点】/【后端】 tag in the title → a **read-only act** in the title (audit, inventory, health check, investigate, survey, verify, comb-through…) with no write act is audit & research — an audit OF the backend is still read-only, and both kinds of act ("audit and fix") is backend → the title's words, with the body consulted only when the title cannot decide and the dispatcher's 【任务引用】 wrapper stripped first → a tie or no evidence falls back to backend. Give the coordinator this convention:
 
 ```text
-Start every task title with 【UI】, 【查阅】 or 【后端】 (【审计】/【排查】/【盘点】 are accepted for 【查阅】).
-【UI】 = visual work: SVG, SVG animation, UI/UX edits, generated visual code, icons, colour, layout.
-【查阅】 = audit & research, read-only: audit, inventory, health check, investigate, survey, look things up, read source, compare, conclude. No file is changed; dispatch it read-only.
-【后端】 = non-visual work: endpoints, data, build, scripts, performance, refactoring, bug fixes.
-Note: auditing the backend, counting stock or investigating a production issue talks about backend and business, but reads only — always 【查阅】.
-When unsure, always 【后端】.
+Start by deciding which list the sub-task needs, then put the group name at the front of the task title (「组：审计查阅」 is accepted anywhere too).
+【UI 绘制】 visual work: SVG, SVG animation, UI/UX edits, generated visual code, icons, colour, layout.
+【审计查阅】 read-only: audit, inventory, health check, investigate, survey, comb through, verify, read source, compare, conclude. Dispatch it read-only.
+【后端处理】 work that changes code or config: endpoints, data, build, scripts, performance, refactoring, bug fixes, deploy and release.
+【审计】/【排查】/【盘点】 are equivalent to 【审计查阅】.
+If you name no group, the plugin guesses from the title keywords; when it cannot tell, it uses backend.
 ```
 
 - **Picker inside the child's list.** On a coordinator child the model menu offers exactly its group, and `/select` judges the pick against that same list — an out-of-list pick is substituted INSIDE the group (same provider first) instead of being pushed onto the general list, and a child sitting outside its list gets a one-click "switch back" line instead of a phantom extra row.
