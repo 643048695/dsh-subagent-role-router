@@ -193,6 +193,32 @@ test('an off-list coordinator child is pulled back without a ReferenceError', as
   h.dispose();
 });
 
+test('moving a child to a list skips a retired head', async () => {
+  const h = harness(config, { catalog: { 'magpie-responses': [{ id: 'codex/gpt-6.1-sol' }] } });
+  const child = h.liveChild(CHILD, { provider: 'magpie-responses', model: 'codex/gpt-6.1-sol' });
+  await h.flush();
+  const res = await h.call({ path: '/subagent-role-router/group', body: { childId: CHILD, group: 'backend' } });
+  assert.equal(res.body.ok, true);
+  assert.deepEqual(res.body.target, { provider: 'magpie', model: 'group/1017' }, 'the list head is retired, so the next live row is applied');
+  assert.deepEqual(child.model.selects.at(-1), { provider: 'magpie', model: 'group/1017' });
+  h.dispose();
+});
+
+test('the coordinator diagnostic names the retired row and the catalog it used', async () => {
+  const h = harness(config, { catalog: { 'magpie-responses': [{ id: 'codex/gpt-6.1-sol' }] } });
+  await h.flush();
+  const res = await h.call({ method: 'GET', path: '/subagent-role-router/coordinator?refresh=1' });
+  const dead = res.body.value.dead;
+  assert.ok(Array.isArray(dead));
+  assert.deepEqual(dead.find((row) => row.group === 'backend'), {
+    group: 'backend',
+    provider: 'magpie-responses',
+    model: 'codex/gpt-6.2-sol'
+  });
+  assert.ok(res.body.value.catalog, 'the freshness of the verdict is reported');
+  h.dispose();
+});
+
 test('a coordinator child already on its list is left alone', async () => {
   const h = harness();
   const child = h.liveChild(CHILD, { provider: 'magpie', model: 'group/1017' });
