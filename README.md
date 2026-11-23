@@ -301,7 +301,8 @@ dsh plugin add link:/path/to/dsh-subagent-role-router
 | `POST /subagent-role-router/batch/select` | 批量设置覆盖 |
 | `POST /subagent-role-router/batch/clear` | 批量清除覆盖 |
 | `GET /subagent-role-router/whitelist` | 原生白名单镜像的当前状态；带 `?childId=` 时返回该子代理所属那一组（协调者子代理）的名单与判定理由 |
-| `GET /subagent-role-router/coordinator` | 协调者子代理的三份名单：条目、实时冷却、梯度计划、通用名单剔除后剩余什么、有没有被占满 |
+| `GET /subagent-role-router/coordinator` | 协调者子代理的三份名单：条目、实时冷却、梯度计划、通用名单剔除后剩余什么、有没有被占满；`dead` 列出被判定为已下架的配置行，`catalog` 给出判断时间与参与判断的供应商 |
+| `GET /subagent-role-router/catalog?route=provider/model` | 只读探针：这一行现在还算不算数（`served: true/false/unknown`）；`?refresh=1` 先重读目录 |
 | `GET /subagent-role-router/exempt-candidates` | 豁免规则的候选值（preset / cwd / 名称前缀） |
 | `POST /subagent-role-router/debug` | 调试记录端点（见上方调试开关） |
 
