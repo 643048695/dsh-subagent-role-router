@@ -34,6 +34,7 @@ With `failoverEnabled` (on by default), a subagent that **fails at all mid-run**
 - **Inherited reasoning strength is dropped** — after switching, the new provider/model is not sent the previous route's `reasoningEffort`; it resolves its own default. Otherwise a target that rejects that level can fail every request and burn through all remaining candidates.
 - **Sticky within a run** — after a switch, later steps of that same subagent stay on the new model instead of flip-flopping every step.
 - **Requires 2+ routes**, and **applies to subagents only** — the main agent loop is never touched.
+- **A hang switches too: 3 minutes with no output** — some channels neither answer nor error, and the request simply hangs (the UI reads "thinking"). The stall watchdog starts its clock when the model call begins and acts after **3 minutes without a single streamed byte**: the route is cooled, the child is moved to the next candidate in its own list through the host's front door (a manual pick is withdrawn first), the hanging attempt is cut (queued messages are kept), one clearly-labelled "continue from where you stopped" line is delivered, and the header pill announces the switch. **The clock stops at the first byte**, so a slow but working model is never killed; two stalls on the same child in a row and the watchdog stands down so the real error can surface. Both knobs live in the config: `stallWatchdogSeconds` (default 180, 0 disables), `stallWatchdogEnabled` (default on).
 
 ### Capability 3 — Route visibility: you can see it, and so can the subagent
 
