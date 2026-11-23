@@ -219,6 +219,8 @@ With no configuration the behavior is identical to not having the plugin install
 
 The client channel is off by default on purpose: it used to POST on **every selector render** — whoever is chasing a bug can still turn it on, but nobody else should pay that network cost.
 
+**Subagent error journal (always on, records only).** The host keeps an error's message and a coarse code but discards the stack, which makes a "some variable is not defined" failure impossible to pin to a file and line. On every subagent error the plugin appends the raw error, stack included, to `~/.dsh/state/subagent-role-router/subagent-errors.log` (512 KB cap, then rotated to `.1`); subagents only, never the main agent, and a failed write never disturbs a session. Look there first when a child dies during startup.
+
 ## HTTP endpoints
 
 The plugin registers the prefix route `/subagent-role-router` on the loopback DSH server (front end accesses it by document-relative path):
