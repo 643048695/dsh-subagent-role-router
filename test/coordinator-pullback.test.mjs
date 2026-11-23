@@ -219,6 +219,37 @@ test('the coordinator diagnostic names the retired row and the catalog it used',
   h.dispose();
 });
 
+test('a manual pick of a retired model is replaced at the door and stored', async () => {
+  const h = harness(config, { catalog: { 'magpie-responses': [{ id: 'codex/gpt-6.1-sol' }] } });
+  const child = h.liveChild(CHILD, { provider: 'magpie', model: 'group/1017' });
+  await h.flush();
+  await h.call({ path: '/subagent-role-router/group', body: { childId: CHILD, group: 'backend' } });
+  await h.call({ path: '/subagent-role-router/clear', body: { childId: CHILD } });
+
+  const picked = await h.call({
+    path: '/subagent-role-router/select',
+    body: { childId: CHILD, provider: 'magpie-responses', model: 'codex/gpt-6.2-sol' }
+  });
+  assert.equal(picked.body.ok, true, 'the write itself succeeds');
+  // The single exit gate replaced the retired route with the page's live row,
+  // and the store was corrected so the picker and the child agree.
+  assert.deepEqual(child.model.selects.at(-1), { provider: 'magpie', model: 'group/1017' });
+  const after = await h.call({ method: 'GET', path: '/subagent-role-router/route?childId=child-pullback' });
+  assert.deepEqual(after.body.value.override, { provider: 'magpie', model: 'group/1017' });
+  h.dispose();
+});
+
+test('the exit gate and the whitelist mirror are wired (source guard)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8');
+  // One gate at the exit, one predicate used by every selection point that picks
+  // without the front door, and the host mirror filtered. If any of these wires
+  // is cut, retired models start leaking again — fail loudly here instead.
+  assert.match(source, /async function applyLiveRouteSelect\(ctx, state, agent, route\)[\s\S]{0,400}liveRouteGate\(ctx, state, agent, route\)/);
+  assert.match(source, /function pickBirthableRoute\([\s\S]{0,600}birthRouteIsDead\(state, route\)/);
+  assert.match(source, /const desired = filterLiveRoutes\(state, hostGateModels\(section\)\)/);
+});
+
 test('a coordinator child already on its list is left alone', async () => {
   const h = harness();
   const child = h.liveChild(CHILD, { provider: 'magpie', model: 'group/1017' });
