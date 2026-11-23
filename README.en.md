@@ -378,6 +378,7 @@ If you name no group, the plugin guesses from the title keywords; when it cannot
 
 - **Runtime pull-back.** A coordinator child running off its list (host model seat, inherited route) is switched back to the group's first usable entry from its next step; a fallback already on the list is never bounced around.
 - **The decisions are persisted.** Every "this child belongs to that list" is written to the local state directory and kept for 24 hours, so a plugin reload no longer forgets it — without that, a reload turned a running coordinator child into an "ordinary" one and switched it onto the general list. A child born while the plugin was down can be re-assigned with `POST /subagent-role-router/group`.
+- **The list is checked at birth: does this model still exist?** A configured row can outlive the model: once a provider retires one, the row stays and the child dies the instant it is created — before any request, so neither failover nor the stall watchdog can see it. The plugin therefore asks the gateway's model catalog first and **skips a candidate the provider provably no longer serves, using the next one**, with a log line naming the row. Answers are cached for five minutes and warmed at load; anything unverifiable (no answer, unavailable, empty list) is used as configured — a catalog hiccup is never read as a broken config.
 - **Exemptions.** Coordinator children are claimed BEFORE the exemption rules, so a matching exemption still does not apply to them; the rules keep serving other plugins.
 
 ## Platform support
