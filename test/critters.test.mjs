@@ -286,16 +286,15 @@ test("critter rows derive from the host session store, not a poll", () => {
   };
   const seed = { "child-a": { provider: "magpie", model: "group/dnq", startedAt: 1000, role: "explore" } };
   const rows = Array.from(client.deriveCritterRows(byId, "session-me", seed));
-  // A parent's fleet is everything ALIVE under it, not only what is busy at
-  // this instant: hiding the idle half is what made six children look like one.
-  assert.deepEqual(rows.map((row) => row.childId), ["child-a", "child-b"], "every live child of THIS parent shows, busy first");
+  // ONE RULE: the strip draws who is WORKING. A finished child (running:false)
+  // stays out of the header — keeping it there claimed "still busy" about a
+  // session nobody is running (live report, 2026-11-24).
+  assert.deepEqual(rows.map((row) => row.childId), ["child-a"], "only the working child of THIS parent is drawn");
   assert.equal(rows[0].label, "worker", "store displayTitle wins over the seed");
   assert.equal(rows[0].provider, "magpie");
   assert.equal(rows[0].model, "group/dnq");
   assert.equal(rows[0].startedAt, 1000);
   assert.equal(rows[0].phase, "in");
-  assert.equal(rows[0].idle, false, "a running child is not idle");
-  assert.equal(rows[1].idle, true, "an idle child is marked, not hidden");
   assert.deepEqual(Array.from(client.deriveCritterRows(byId, "session-other", null)).map((row) => row.childId), ["child-c"]);
   const unseeded = Array.from(client.deriveCritterRows(byId, "session-other", null));
   assert.equal(unseeded[0].provider, "", "no seed means blank route fields, not invented ones");
