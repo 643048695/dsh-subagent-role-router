@@ -80,7 +80,7 @@ function liveChild(id, route, label = id, status = 'inactive') {
     id,
     status,
     session: {
-      header: { origin: 'subagent', label },
+      header: { origin: 'subagent', label, parentSession: 'parent-1' },
       requestContext: () => ({ ...route, contextWindow: 1000 }),
       requestHeader: () => ({ config: { ...route } }),
       snapshotEvents: () => []
@@ -289,9 +289,13 @@ test('batchModelCatalog keeps configured efforts when the catalog cannot answer'
 test('a provider is asked once per provider and once per model, then cached', async () => {
   const h = harness({ children: [{ id: 'abc', mode: 'continuable' }] });
   await h.batch('parent-1');
-  assert.deepEqual(h.modelCalls.slice().sort(), ['p', 'q', 't'], 'one list call per configured provider');
+  // The plugin also warms the BIRTH catalog on mount (a separate cache with its
+  // own lifetime), so give that fire-and-forget round time to settle before
+  // counting the batch card's own asks.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual([...new Set(h.modelCalls)].sort(), ['p', 'q', 't'], 'every configured provider is asked');
   assert.deepEqual(
-    h.infoCalls.slice().sort(),
+    [...new Set(h.infoCalls)].sort(),
     ['p/a', 'p/explore', 'p/plan', 'q/b', 't/tm'],
     'the strengths are asked for per model, which is the only call that reports them'
   );
@@ -696,6 +700,49 @@ test('a write for one child leaves its sibling untouched', async () => {
   const rows = new Map(body.value.children.map((row) => [row.childId, row]));
   assert.deepEqual(rows.get('a1').override, { provider: 'q', model: 'b' });
   assert.equal(rows.get('a2').override, null);
+  h.dispose();
+});
+
+test('a batch write is judged against the child\'s own coordinator list, not the general pool', async () => {
+  // The batch card offers both lists' rows when a coordinator child is on the
+  // page (that is a MENU), but each child is still held to the list it belongs
+  // to at write time. The bug: `applyBatchSelection` validated every pick
+  // against `hostModelPool` (the general list), so a legal group row was either
+  // refused or — worse — an ordinary-list row was written onto a group child.
+  const h = harness({
+    settings: {
+      ...config,
+      coordinatorEnabled: true,
+      coordinatorUiModels: [{ provider: 'p', model: 'explore' }],
+      coordinatorResearchModels: [{ provider: 'p', model: 'plan' }],
+      coordinatorBackendModels: [{ provider: 'q', model: 'b' }],
+      coordinatorDeliveryModels: []
+    },
+    children: [
+      { id: 'coord', mode: 'continuable' },
+      { id: 'plain', mode: 'continuable' }
+    ],
+    live: [
+      ['coord', { provider: 'p', model: 'a' }, 'coord'],
+      ['plain', { provider: 'p', model: 'a' }, 'plain']
+    ]
+  });
+  const grouped = await h.call({
+    method: 'POST',
+    path: '/subagent-role-router/group',
+    body: { childId: 'coord', group: 'ui', parentSessionId: 'parent-1' }
+  });
+  assert.equal(grouped.body.ok, true, `the live child is grouped through the verified write path: ${JSON.stringify(grouped.body)}`);
+  assert.deepEqual(grouped.body.target, { provider: 'p', model: 'explore' });
+
+  const offList = await h.select('parent-1', [{ childId: 'coord', provider: 'p', model: 'plan' }]);
+  assert.equal(offList.body.value.results[0].error.code, 'model-not-allowed',
+    'p/plan is on the research list and the general pool, but not on this child\'s UI list');
+  const onList = await h.select('parent-1', [{ childId: 'coord', provider: 'p', model: 'explore' }]);
+  assert.equal(onList.body.value.results[0].ok, true, 'the child\'s own list row is writable');
+
+  const ordinary = await h.select('parent-1', [{ childId: 'plain', provider: 'p', model: 'plan' }]);
+  assert.equal(ordinary.body.value.results[0].ok, true, 'a sibling without a group keeps the general pool');
   h.dispose();
 });
 

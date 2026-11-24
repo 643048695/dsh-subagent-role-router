@@ -303,6 +303,172 @@ test("critter rows derive from the host session store, not a poll", () => {
   assert.equal(client.deriveCritterRows(null, "session-me", seed).length, 0);
 });
 
+test("the batch seed no longer overrides the current route on the store row", () => {
+  const { client } = loadClient();
+  const byId = {
+    "child-a": {
+      id: "child-a",
+      running: true,
+      parentId: "session-me",
+      displayTitle: "worker",
+      provider: "p-current",
+      model: "m-current"
+    },
+    "child-b": {
+      id: "child-b",
+      running: true,
+      parentId: "session-me",
+      displayTitle: "fresh"
+      // no route on the row: the seed is the only source
+    }
+  };
+  const seed = {
+    "child-a": { provider: "p-stale", model: "m-stale", startedAt: 1000 },
+    "child-b": { provider: "p-seed", model: "m-seed", startedAt: 2000 }
+  };
+  const rows = Array.from(client.deriveCritterRows(byId, "session-me", seed));
+  const a = rows.find((row) => row.childId === "child-a");
+  const b = rows.find((row) => row.childId === "child-b");
+  assert.equal(a.provider, "p-current", "the live store route wins");
+  assert.equal(a.model, "m-current");
+  assert.equal(a.startedAt, 1000, "the seed still supplies the spawn time");
+  assert.equal(b.provider, "p-seed", "a row with no route falls back to the seed");
+  assert.equal(b.model, "m-seed");
+});
+
+test("the real Session status decides who is working, then the scoped row", () => {
+  const { client } = loadClient();
+  const byId = {
+    // Addressable child: the directory row still says false, the host status
+    // map proves it is running. Trusting the row alone dropped this critter.
+    "child-addressable": { running: false, parentId: "session-me", displayTitle: "live" },
+    // The row bit is stale in the other direction: status says stopped, so no
+    // idle/history ghost may stay in the header.
+    "child-ghost": { running: true, parentId: "session-me", displayTitle: "gone" },
+    // Status has no answer yet (`running: undefined`): the scoped fallback is
+    // the only evidence, and here it says the child works.
+    "child-fallback": { running: true, parentId: "session-me", displayTitle: "fallback" }
+  };
+  const statuses = new Map([
+    ["child-addressable", { running: true }],
+    ["child-ghost", { running: false }],
+    ["child-fallback", { running: undefined }]
+  ]);
+  const rows = Array.from(client.deriveCritterRows(byId, "session-me", null, true, statuses));
+  assert.deepEqual(rows.map((row) => row.childId).sort(), ["child-addressable", "child-fallback"]);
+  assert.ok(!rows.some((row) => row.childId === "child-ghost"), "a status-stopped child is not drawn");
+
+  // Without the status map nothing is invented: the scoped bit remains the
+  // compatibility fallback and only a true one draws.
+  const fallbackRows = Array.from(client.deriveCritterRows(byId, "session-me", null, true));
+  assert.deepEqual(fallbackRows.map((row) => row.childId), ["child-fallback", "child-ghost"]);
+});
+
+test("critter route pairs come from one source and never mix provider with model", () => {
+  const { client } = loadClient();
+  const byId = {
+    "child-half": {
+      running: true,
+      parentId: "session-me",
+      provider: "p-store",
+      // no model on the store row: the seed owns the complete pair
+      model: undefined
+    },
+    "child-row": { running: true, parentId: "session-me", provider: "p-row", model: "m-row" },
+    "child-seed": { running: true, parentId: "session-me" },
+    "child-verified": { running: true, parentId: "session-me", provider: "p-row-2", model: "m-row-2" }
+  };
+  const seed = {
+    "child-half": { provider: "p-seed", model: "m-seed" },
+    "child-row": { provider: "p-stale", model: "m-stale" },
+    "child-seed": { provider: "p-seed", model: "m-seed" }
+  };
+  const verified = { "child-verified": { provider: "p-verified", model: "m-verified" } };
+  const rows = Array.from(client.deriveCritterRows(byId, "session-me", seed, true, null, verified));
+  const byChild = Object.fromEntries(rows.map((row) => [row.childId, row]));
+
+  assert.deepEqual(
+    { provider: byChild["child-half"].provider, model: byChild["child-half"].model },
+    { provider: "p-seed", model: "m-seed" },
+    "a half store pair is never completed from another source"
+  );
+  assert.deepEqual(
+    { provider: byChild["child-row"].provider, model: byChild["child-row"].model },
+    { provider: "p-row", model: "m-row" },
+    "a complete store pair wins over the stale seed"
+  );
+  assert.deepEqual(
+    { provider: byChild["child-verified"].provider, model: byChild["child-verified"].model },
+    { provider: "p-verified", model: "m-verified" },
+    "the last server-verified pair wins over the store row"
+  );
+  assert.equal(byChild["child-seed"].provider, "p-seed");
+
+  // Two halves with no complete source stay blank rather than pair a
+  // provider from one row with a model from another.
+  const halfOnly = Array.from(client.deriveCritterRows(
+    { "child-only-half": { running: true, parentId: "session-me", provider: "p-only" } },
+    "session-me",
+    null,
+    true,
+    null,
+    null
+  ));
+  assert.equal(halfOnly[0].provider, "", "an unpaired provider is not painted");
+  assert.equal(halfOnly[0].model, "");
+});
+
+test("the newer batch seed overrides the one-shot activity seed", () => {
+  const { client } = loadClient();
+  const asPlain = (value) => JSON.parse(JSON.stringify(value));
+  const merged = client.critterSeedMerge(
+    { a: { provider: "p-old", model: "m-old", startedAt: 1000, label: "old" } },
+    { a: { provider: "p-new", model: "m-new", startedAt: 2000 } }
+  );
+  assert.deepEqual(asPlain(merged.a), { provider: "p-new", model: "m-new", startedAt: 2000 });
+  assert.deepEqual(asPlain(client.critterSeedMerge(null, null)), {});
+});
+
+test("the membership signature tracks route changes and ignores number ticks", () => {
+  const { client } = loadClient();
+  const snap = (model, extra) => ({
+    byId: {
+      a: Object.assign({ id: "a", running: true, parentId: "session-me", displayTitle: "worker", provider: "p", model }, extra || {})
+    }
+  });
+  const first = client.crittersMembersKey(snap("m1"), "session-me");
+  const tokenTick = snap("m1", { projectionValues: { tokenUsage: { outputTokens: 9999 } }, updatedAt: 42 });
+  assert.equal(client.crittersMembersKey(tokenTick, "session-me"), first, "a number tick is not a route change");
+  assert.notEqual(client.crittersMembersKey(snap("m2"), "session-me"), first, "a model switch re-renders");
+  assert.notEqual(
+    client.crittersMembersKey(snap("m1"), "session-me", { a: { provider: "p", model: "m-verified" } }),
+    first,
+    "the verified pair is part of the drawn signature"
+  );
+});
+
+test("the status selector watches only this anchor family", () => {
+  const { client } = loadClient();
+  const byId = {
+    a: { running: true, parentId: "session-me" },
+    b: { running: true, parentId: "session-me" },
+    other: { running: true, parentId: "session-elsewhere" }
+  };
+  const statuses = new Map([
+    ["a", { running: true }],
+    ["other", { running: true }]
+  ]);
+  const key = client.crittersStatusKey(byId, "session-me", statuses);
+  assert.equal(client.crittersStatusKey(byId, "session-me", new Map([["a", { running: true }], ["other", { running: false }]])), key,
+    "an unrelated session flipping does not move the key");
+  assert.notEqual(client.crittersStatusKey(byId, "session-me", new Map([["a", { running: false }]])), key,
+    "this anchor's running flip does move it");
+
+  const selection = client.crittersStatusSelection(byId, "session-me", statuses);
+  assert.deepEqual(Array.from(selection.statuses.keys()), ["a"], "only this family's entries are handed over");
+  assert.equal(selection.key, key);
+});
+
 test("the batch presence signature moves when the selectable set moves", () => {
   const { client } = loadClient();
   const catalog = [

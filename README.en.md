@@ -4,7 +4,7 @@ English | [中文](README.md)
 
 Route subagent delegations in [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-harness) and show what is running: per-role routing with a candidate pool per role, cross-provider failover, fork window slicing — plus header critters, mid-run and batch model switching, and model-callable routing tools. Configured through the plugin's own settings card (its Cordis `Config`), stored in the profile's `cordis.patch.yml`.
 
-When a subagent is created without an explicit `model`, this plugin picks a route for it — so every `subagent`, `subagent_fork`, and any tool that omits `agentOptions` routes through it. Explicit per-call overrides always win; an absent or incomplete settings section keeps the historical behavior (children inherit the parent route).
+The plugin selects a birth route from the child's role or coordinator list. By default, an exact configured pick is honored; an absent or off-list pick uses the pool. The `explicit` policy preserves a caller's route. Team and exempt-plugin pins keep their own priority. No configured pool preserves inheritance; a pool proven entirely retired reports a clear error.
 
 Once things are running, the plugin also gives the state back to you: pixel critters in the session header show who is working, for how long and how many tokens, and a click jumps straight into that subagent's conversation; the subagent header carries a model + reasoning-effort picker; a batch card rewrites every direct child at once; and a stuck subagent gets a second, visible stop attempt. **Dispatch, observation and intervention all live in one plugin.**
 
@@ -27,14 +27,14 @@ With `failoverEnabled` (on by default), a subagent that **fails at all mid-run**
 
 - **Provider-agnostic** — candidates come from the whole `models` list, so failover works **across providers**. If `deepseek-official/deepseek-v4-pro` dies, the subagent can fail over to a *different vendor's* model in the list — not merely another model ID from the same vendor.
 - **No more "known codes" allowlist** — from 5.8.0 it is a blacklist: everything except cancellation switches. A live run taught this the hard way: a gateway answered an entirely normal step with a bare "400, the request could not be completed", the old list did not recognise it, and the child stopped dead — while the same payload ran fine on another model.
-- **The switching is bounded** — each candidate is tried at most once per run, `candidates - 1` switches in total, then the real error surfaces. A genuinely broken request pays one round trip per candidate, never an endless loop.
+- **The switching is bounded** — each failed candidate is tried once per consecutive failure episode, which resets after a committed complete assistant reply, `candidates - 1` switches in total, then the real error surfaces. A genuinely broken request pays one round trip per candidate, never an endless loop.
 - **Auth-class failures switch too** — when each provider holds its own credentials, one bad key must not kill the whole delegation while healthy providers sit unused. **But an auth switch always emits a warning** naming the provider whose key was refused: switching buys resilience, and the **log line** keeps the misconfiguration from being silently hidden.
 - **The route that actually failed cools down** — never the fallback that took over. The wait comes from the configured seconds (`0` = no cooldown).
-- **The top bar says so** — the child's own transcript shows nothing (it is retried, not interrupted), so the session header shows a pill — "“model A” failed — switched to “model B”" — that disappears after 12 seconds and can be dismissed with ×. A withdrawn manual pick reads "back to …".
+- **A switch creates a fresh turn.** The plugin selects the target, cancels the frozen failing attempt with the inbox kept, then immediately queues a continuation of the same task. The new turn reads the new selection. Returning retry would reuse the failed selection, so it is never reported as a model switch. The header names both routes.
 - **Inherited reasoning strength is dropped** — after switching, the new provider/model is not sent the previous route's `reasoningEffort`; it resolves its own default. Otherwise a target that rejects that level can fail every request and burn through all remaining candidates.
 - **Sticky within a run** — after a switch, later steps of that same subagent stay on the new model instead of flip-flopping every step.
 - **Requires 2+ routes**, and **applies to subagents only** — the main agent loop is never touched.
-- **A hang switches too: 3 minutes with no output** — some channels neither answer nor error, and the request simply hangs (the UI reads "thinking"). The stall watchdog starts its clock when the model call begins and acts after **3 minutes without a single streamed byte**: the route is cooled, the child is moved to the next candidate in its own list through the host's front door (a manual pick is withdrawn first), the hanging attempt is cut (queued messages are kept), one clearly-labelled "continue from where you stopped" line is delivered, and the header pill announces the switch. **The clock stops at the first byte**, so a slow but working model is never killed; two stalls on the same child in a row and the watchdog stands down so the real error can surface. Both knobs live in the config: `stallWatchdogSeconds` (default 180, 0 disables), `stallWatchdogEnabled` (default on).
+- **A hang switches too: 3 minutes with no output** — some channels neither answer nor error, and the request simply hangs (the UI reads "thinking"). The stall watchdog starts its clock when the model call begins and acts after **3 minutes without a single streamed byte**: the route is cooled, the child is moved to the next candidate in its own list through the host's front door (a manual pick is withdrawn first), the hanging attempt is cut (queued messages are kept), one clearly-labelled "continue from where you stopped" line is delivered, and the header pill announces the switch. **The clock stops at the first byte**, so a slow but working model is never killed; the watchdog stands down when no untried candidate remains. Only a real successful reply resets the episode. Both knobs live in the config: `stallWatchdogSeconds` (default 180, 0 disables), `stallWatchdogEnabled` (default on).
 
 ### Capability 3 — Route visibility: you can see it, and so can the subagent
 
@@ -142,7 +142,7 @@ Two tools let the model inspect and rewrite subagent routing without a human cli
 
 When the host handles a stop request it looks the subagent up in the resident activation table and, **if it is not there, returns silently** — the UI reports "accepted", the button greys out, the subagent keeps running, and nothing says why.
 
-This plugin now wraps the shared cancel action: it measures the host's return value, re-checks the running state about a second later, and if the child is still running retries the interrupt through its own `/subagent-role-router/stop` endpoint — covering both id spellings (with and without the `session-` prefix) and both authorization shapes (parent session, resident ancestor) — and reports every attempt's outcome back to the UI. **A refusal becomes a visible refusal.**
+This plugin now wraps the shared cancel action: it measures the host's return value, re-checks the running state about a second later, and if the child is still running retries the interrupt through its own `/subagent-role-router/stop` endpoint — covering both id spellings (with and without the `session-` prefix) and verified resident-child ownership and the exact live ancestor agent — and reports every attempt's outcome back to the UI. **A refusal becomes a visible refusal.**
 
 ### Capability 10 — Birth route policy: the pool decides by default
 
@@ -150,7 +150,7 @@ This plugin now wraps the shared cancel action: it measures the host's return va
 
 A new `birthRoutePolicy` setting, default `pool`:
 
-- **`pool` (default)** — a model written into the birth parameters **does not count**: an off-list explicit model is replaced by a pool entry (other parameters such as token caps are kept, and the spawn occupies a pool lane). A model **on the page whitelist** is honoured as a deliberate pick: an exact `(provider, model)` pair, a different provider alias + same model name, or a bare short name (`dnq` → `group/dnq`) all match, pass through untouched, and occupy no lane.
+- **`pool` (default)** — an off-list model is replaced by a role/general candidate and occupies a lane. Approval uses the exact provider/model pair. A model-only or short id must resolve to a unique configured route and is normalized before dispatch. A replacement never inherits the old model's reasoning effort.
 - **`explicit`** — the old behaviour: whatever the caller wrote is honoured.
 - **Precedence** — a switch you make in the plugin panel **always wins** (it happens after birth); agent-teams members and children matching an exemption rule are untouched. Plugins that spawn their own children with their own models (e.g. Mnemon) coexist via a name-prefix exemption rule.
 
@@ -231,7 +231,7 @@ The plugin registers the prefix route `/subagent-role-router` on the loopback DS
 | `POST /subagent-role-router/select` | Set a model/effort override for one subagent (this is also how mid-run switching works) |
 | `POST /subagent-role-router/clear` | Clear one subagent's override |
 | `POST /subagent-role-router/group` | Re-assign one subagent to a list (`ui`/`research`/`backend`; empty removes it) and apply that list's first route |
-| `POST /subagent-role-router/stop` | Stop fallback: retry the interrupt with both id spellings and both authorization shapes |
+| `POST /subagent-role-router/stop` | Stop fallback: verify a live child and its parent, then interrupt with the exact ancestor agent |
 | `GET /subagent-role-router/events` | SSE change stream (route picks, overrides, failover, member routes), 25-second heartbeat |
 | `GET /subagent-role-router/activity` | Live snapshot of the subagents in the current conversation |
 | `GET /subagent-role-router/batch` | Data for the batch card (writable direct children + model pool) |
@@ -360,12 +360,12 @@ An entry may be a `provider/model` string or the object form above; `reasoningEf
 
 ## The coordinator's four lists
 
-One plugin (dsh-orchestrator by default) dispatches every unit of work as a child session. Its work splits into **visual content** (SVG, SVG animation, UI/UX edits, generated visual code), **read-only audit & research** (audit, inventory, health check, investigate, look things up, read source, compare, conclude — nothing is changed), **delivery** (build, package, sign, upload, release, deploy, install, run the tests, check the receipt, move batches — the goal is already decided and the work ends with something to hand over, no design decisions) and **backend changes** (work that needs a decision about what to change). Each gets its own list, strictly isolated from the general one.
+One plugin (dsh-orchestrator by default) dispatches every unit of work as a child session. Its work splits into **visual content** (SVG, SVG animation, UI/UX edits, generated visual code), **read-only audit & research** (audit, inventory, health check, investigate, look things up, read source, compare, conclude — nothing is changed), **delivery** (build, package, sign, upload, release, deploy, install, run the tests, check the receipt, move batches — the goal is already decided and the work ends with something to hand over, no design decisions) and **backend changes** (work that needs a decision about what to change). Each gets its own list. A model may explicitly belong to both ordinary and coordinator lists.
 
 **An empty delivery list follows the backend list.** Classification already works, but until the fourth list has models, delivery jobs keep running on the backend group — exactly what they ran on before the split, never the parent's expensive route.
 
 - **Ordered lists.** Entry one is the default; a failure rests it for a graded wait (light 1/3/5, medium 1/5/15, heavy 2/10/30 minutes, or custom), the next entry serves meanwhile, and when the wait is over entry one is tried again. A rate limit starts one step in. "Never fall through" surfaces the first failure instead of switching.
-- **Isolation.** A route named in these four lists is removed from the base pool, the four role pools and the single-model form — an ordinary subagent can never use it — and the general routes never leak into these lists. The host's global gate receives the union (it has a single list); this plugin judges every child against the list its own group owns.
+- **Explicit membership.** Ordinary children use their general or role list; coordinator children use their group. Sharing a model never removes it from either list. Group-only routes remain group-only. The native gate receives the union of enabled lists.
 - **Classification: the coordinator names the group, the plugin only guesses when it does not.** The coordinator is the party that knows what a unit of work is FOR, so it can say so outright — 「组：审计查阅」 in the title or the task description, 【组：后端】, `group: research`, 「交给审计组」 — and **that is the answer; tags and keywords stand down**. Only when it says nothing: a 【UI】/【审计】【排查】【盘点】/【后端】 tag in the title → a **read-only act** in the title (audit, inventory, health check, investigate, survey, verify, comb-through…) with no write act is audit & research — an audit OF the backend is still read-only, and both kinds of act ("audit and fix") is backend → the title's words, with the body consulted only when the title cannot decide and the dispatcher's 【任务引用】 wrapper stripped first → a tie or no evidence falls back to backend. Give the coordinator this convention:
 
 ```text
@@ -389,7 +389,7 @@ If you name no group, the plugin guesses from the title keywords; when it cannot
 
 ## Platform support
 
-**Windows, macOS, and Linux are all supported**, and no platform-specific configuration is needed. The plugin's runtime code is **pure JavaScript**: `lib/index.js` (host half) and `lib/client.js` (client half) never touch the filesystem, join paths, spawn processes, or branch on `process.platform` — they only consume services and events the DSH host exposes, so platform differences are owned entirely by the host.
+**Windows, macOS, and Linux are all supported**, and no platform-specific configuration is needed. The plugin uses JavaScript and host services. Its optional local state and diagnostics derive paths from the profile environment, never a hard-coded user directory.
 
 Platform-relevant surfaces that were checked and are now continuously verified:
 
@@ -403,7 +403,7 @@ CI runs the same suite on `ubuntu-latest`, `windows-latest`, and `macos-latest`,
 
 ## Subagent connection-failure failover
 
-With `failoverEnabled` on (the default), when a subagent's own loop hits **any failure except a cancellation**, the plugin automatically switches models inside the `models` list and retries, following `strategy`. See [Capability 2](#capability-2--cross-provider-failover-if-one-provider-is-down-run-on-another-providers-model) above for the full account; the key points:
+With `failoverEnabled` on (the default), when a subagent's own loop hits **any failure except a cancellation**, the plugin selects an untried model from the child's own role/group/general list and starts a new turn on that selection. See [Capability 2](#capability-2--cross-provider-failover-if-one-provider-is-down-run-on-another-providers-model) above for the full account; the key points:
 
 - **Cross-provider** — candidates are the whole `models` list, so it can fail over to a model from another provider, not just another model ID from the same vendor.
 - **Failure classes** — everything switches (rate limits, quota, server and transport errors, timeouts, auth failures with a warning, and opaque gateway 4xx rejections alike); only a cancelled run does not. Each candidate is tried at most once per run.

@@ -684,3 +684,26 @@ test("12. the main conversation's page has no back chip", () => {
   assert.equal(backChipOf(h.tree), null, "no way back when we are already at the family's root");
   h.unmount();
 });
+
+test("13. a critter riding the exit animation cannot be clicked", () => {
+  const h = loadCritters();
+  h.publish({
+    a: child(PARENT, { displayTitle: "alpha task" }),
+    b: child(PARENT, { displayTitle: "beta task" })
+  });
+  h.render();
+  // b stops: its station stays for the farewell animation, not for a jump.
+  h.publish({ a: child(PARENT, { displayTitle: "alpha task" }) });
+  h.act();
+
+  const stations = stationsOf(h.tree);
+  assert.equal(stations.length, 2, "live station plus the ending one");
+  const ending = stations.find((station) => station.props["data-critter-title"] === "beta task");
+  assert.ok(ending, "the ended child still draws its leaving art");
+  assert.equal(ending.props.disabled, true, "a dead station is disabled");
+  assert.equal(ending.props["aria-disabled"], "true");
+  ending.props.onClick(clickEvent());
+  ending.props.onKeyDown({ key: "Enter", preventDefault() {} });
+  assert.deepEqual(h.openCalls, [], "neither pointer nor keyboard may open an ended child");
+  h.unmount();
+});

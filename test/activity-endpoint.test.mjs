@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { apply } from "../lib/index.js";
+import { apply, listActiveChildren, pruneStaleActivity } from "../lib/index.js";
 
 // End-to-end over the plugin's OWN HTTP surface: a spawn goes in through the
 // subagents service, and what the header critters will poll comes out of the
@@ -25,9 +25,13 @@ function harness(settings = config) {
 		for (const fn of listeners.get(name) ?? []) fn(payload);
 	};
 
+	const agents = new Map();
+	let spawned = 0;
 	const subagents = {
 		startActivation(spec) {
-			return { childId: "child-abc", result: new Promise(() => {}) };
+			const n = ++spawned;
+			const childId = n === 1 ? "child-abc" : `child-${n}`;
+			return { childId, result: new Promise(() => {}) };
 		}
 	};
 
@@ -70,7 +74,10 @@ function harness(settings = config) {
 				fn({ ...ctx, subagents });
 			}
 		},
-		get() {
+		get(name) {
+			// The activity ledger asks the host's own registry whether a row is
+			// still a live resident child; ages alone must never decide that.
+			if (name === "agents") return { get: (id) => agents.get(id) };
 			return undefined;
 		}
 	};
@@ -102,7 +109,7 @@ function harness(settings = config) {
 		return subagents.startActivation({ provider: "spawn", label: request.label, request });
 	}
 
-	return { ctx, subagents, routes, emit, get, spawn: spawnSelf, cleanups };
+	return { ctx, subagents, agents, routes, emit, get, spawn: spawnSelf, cleanups };
 }
 
 test("a spawn reaches the activity route without a lane lease", async () => {
@@ -120,6 +127,7 @@ test("a spawn reaches the activity route without a lane lease", async () => {
 
 	const other = await h.get("/subagent-role-router/activity?parentSessionId=session-p2");
 	assert.equal(other.body.value.count, 0);
+	for (const cleanup of h.cleanups) cleanup();
 });
 
 test("disposal removes the child from the route", async () => {
@@ -131,6 +139,7 @@ test("disposal removes the child from the route", async () => {
 	h.emit("agent/disposed", { agent: { id: "child-abc" } });
 
 	assert.equal((await h.get("/subagent-role-router/activity?parentSessionId=session-p1")).body.value.count, 0);
+	for (const cleanup of h.cleanups) cleanup();
 });
 
 test("an unfinished spawn is not left behind when the route answers without a filter", async () => {
@@ -141,6 +150,7 @@ test("an unfinished spawn is not left behind when the route answers without a fi
 	const all = await h.get("/subagent-role-router/activity");
 	assert.equal(all.body.ok, true);
 	assert.equal(all.body.value.count, 1);
+	for (const cleanup of h.cleanups) cleanup();
 });
 
 test("teardown unregisters the route and clears the ledger", async () => {
@@ -149,4 +159,66 @@ test("teardown unregisters the route and clears the ledger", async () => {
 	h.spawn({ prompt: "look around", label: "explore", parent: { id: "session-p1" } });
 	for (const cleanup of h.cleanups) cleanup();
 	assert.equal(h.routes.length, 0);
+});
+
+test("the row cap never evicts a child the host still reports running", async () => {
+	const h = harness();
+	// The first spawn is a verified resident runner; every later row is an
+	// unreported ghost. The cap fills, and the runner must survive the churn.
+	h.agents.set("child-abc", { id: "child-abc", status: "running" });
+	for (let index = 0; index < 70; index += 1) {
+		h.spawn({ prompt: `task ${index}`, label: "explore", parent: { id: "session-p1" } });
+	}
+	const all = await h.get("/subagent-role-router/activity");
+	assert.ok(all.body.value.active.some((row) => row.childId === "child-abc"), "the running child survives the cap");
+	assert.ok(all.body.value.count <= 64, "the ledger stays bounded");
+	for (const cleanup of h.cleanups) cleanup();
+});
+
+test("TTL is a ghost reaper: a long-running resident child is never stale", () => {
+	const now = 10_000_000;
+	const old = now - 7 * 60 * 60 * 1000; // older than the 6-hour TTL
+	const entry = (childId) => ({
+		childId,
+		parentSessionId: "session-p1",
+		label: null,
+		role: null,
+		provider: null,
+		model: null,
+		startedAt: old
+	});
+	const state = {
+		activity: new Map([["runner", entry("runner")], ["ghost", entry("ghost")]]),
+		liveAgents: {
+			get(id) { return id === "runner" ? { id, status: "running" } : { id, status: "idle" }; }
+		}
+	};
+	const rows = listActiveChildren(state, "session-p1", now);
+	const runner = rows.find((row) => row.childId === "runner");
+	assert.equal(runner.stale, false, "age alone cannot make a live runner stale");
+	assert.ok(runner.ageMs > 6 * 60 * 60 * 1000);
+	const fresh = pruneStaleActivity(state, rows);
+	assert.deepEqual(fresh.map((row) => row.childId), ["runner"],
+		"only the non-running ghost is pruned");
+	assert.equal(state.activity.has("runner"), true);
+	assert.equal(state.activity.has("ghost"), false);
+});
+
+test("TTL still reaps a stale row the host cannot verify", () => {
+	const now = 10_000_000;
+	const state = {
+		activity: new Map([["ghost", {
+			childId: "ghost",
+			parentSessionId: "session-p1",
+			label: null,
+			role: null,
+			provider: null,
+			model: null,
+			startedAt: now - 7 * 60 * 60 * 1000
+		}]])
+	};
+	const rows = listActiveChildren(state, "session-p1", now);
+	assert.equal(rows[0].stale, true);
+	assert.deepEqual(pruneStaleActivity(state, rows), []);
+	assert.equal(state.activity.size, 0);
 });

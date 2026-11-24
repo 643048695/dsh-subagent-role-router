@@ -91,6 +91,22 @@ function harness(settings = config, options = {}) {
     },
     get(key) {
       if (key === 'agents') return { get: (id) => agents.get(id) };
+      // `/group`, `/select` and `/clear` re-read ownership from the host's own
+      // catalog; the fixture must therefore expose the same parent-scoped list.
+      if (key === 'subagents') {
+        return {
+          async listDescendants(root) {
+            const forms = [root, root.startsWith('session-') ? root.slice(8) : 'session-' + root];
+            const rows = [];
+            for (const agent of agents.values()) {
+              const header = agent.session?.header ?? {};
+              if (header.origin !== 'subagent' || !forms.includes(header.parentSession)) continue;
+              rows.push({ id: agent.id, mode: 'continuable', label: header.label ?? agent.id, parentId: header.parentSession, depth: 1 });
+            }
+            return rows;
+          }
+        };
+      }
       if (key === 'llm' && options.catalog) {
         return {
           async listModels(provider) { return options.catalog[provider] ?? []; }
@@ -137,7 +153,7 @@ function harness(settings = config, options = {}) {
     const agent = {
       id,
       session: {
-        header: { origin: 'subagent', label: 'worker' },
+        header: { origin: 'subagent', label: 'worker', parentSession: 'parent-1' },
         requestContext: () => ({ ...served, contextWindow: 1000 }),
         requestHeader: () => ({ config: { ...served } }),
         snapshotEvents: () => []

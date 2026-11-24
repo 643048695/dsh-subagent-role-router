@@ -48,13 +48,16 @@ test('route lists compare as sets, not as orderings', () => {
   assert.equal(sameWhitelist(undefined, []), true);
 });
 
-function fakeCtx({ current, update, hasSettings = true } = {}) {
+function fakeCtx({ current, update, hasSettings = true, revision, describe } = {}) {
   const writes = [];
   return {
     writes,
     get(name) {
       if (name === 'settings') {
-        return hasSettings ? { update: (...args) => { writes.push(args); return update?.(...args); } } : undefined;
+        return hasSettings ? {
+          update: (...args) => { writes.push(args); return update?.(...args); },
+          describe: describe ?? (() => [{ ns: 'subagent-model-selection-settings', revision }])
+        } : undefined;
       }
       if (name === 'subagentModelSelection') {
         return {
@@ -112,6 +115,96 @@ test('missing services and empty pages never throw or half-write', async () => {
   const empty = fakeCtx({ current: undefined });
   assert.deepEqual(await syncHostWhitelist(empty, { getSection: () => ({}) }), { synced: false, reason: 'no-models' });
   assert.equal(empty.writes.length, 0);
+});
+
+test('a write carries the revision the gate was read at', async () => {
+  const ctx = fakeCtx({
+    current: { enabled: true, allowedModels: [{ provider: 'old', model: 'x' }] },
+    revision: 7
+  });
+  const outcome = await syncHostWhitelist(ctx, state);
+  assert.equal(outcome.synced, true);
+  assert.equal(ctx.writes.length, 1);
+  assert.equal(ctx.writes[0][2], 7, 'rc.5 settings.update takes expectedRevision as its third argument');
+});
+
+test('a concurrent manual edit wins: CAS conflict is reported, not retried', async () => {
+  const conflict = Object.assign(new Error('settings namespace changed since it was read'), {
+    name: 'SettingsConflictError',
+    code: 'SETTINGS_CONFLICT',
+    expected: 7,
+    actual: 8
+  });
+  const ctx = fakeCtx({
+    current: { enabled: true, allowedModels: [{ provider: 'old', model: 'x' }] },
+    revision: 7,
+    update() { throw conflict; }
+  });
+  const outcome = await syncHostWhitelist(ctx, state);
+  assert.equal(outcome.synced, false);
+  assert.equal(outcome.reason, 'revision-conflict');
+  assert.equal(outcome.expected, 7);
+  assert.equal(outcome.actual, 8);
+  assert.equal(ctx.writes.length, 1, 'one attempted write; a conflict must never trigger a blind second one');
+});
+
+test('a page that becomes empty revokes the mirror this plugin wrote', async () => {
+  let gate = { enabled: true, allowedModels: [{ provider: 'old', model: 'x' }] };
+  const page = { getSection: () => section };
+  const ctx = fakeCtx({
+    current: () => gate,
+    revision: 3,
+    update(ns, patch, expected) {
+      gate = { ...patch };
+      assert.equal(typeof expected, 'number');
+    }
+  });
+  const first = await syncHostWhitelist(ctx, page);
+  assert.equal(first.synced, true);
+  assert.equal(gate.enabled, true);
+  assert.ok(page.hostWhitelistMirror.length > 0, 'the plugin records what it mirrored');
+
+  // The user clears every model. The ENABLED gate it used to mirror must not
+  // linger with stale routes (an enabled gate offering routes the page no
+  // longer configures is exactly the drift this mirror exists to prevent).
+  page.getSection = () => ({});
+  const revoked = await syncHostWhitelist(ctx, page);
+  assert.equal(revoked.synced, true);
+  assert.equal(revoked.reason, 'revoked');
+  assert.equal(gate.enabled, false);
+  assert.deepEqual(gate.allowedModels, []);
+  assert.equal(page.hostWhitelistMirror, undefined);
+  const writes = ctx.writes.length;
+  // Second call: ownership is gone with the mirror, so there is nothing to write.
+  assert.equal((await syncHostWhitelist(ctx, page)).reason, 'no-models');
+  assert.equal(ctx.writes.length, writes);
+});
+
+test('an empty page never revokes a gate a human edited', async () => {
+  let gate = { enabled: true, allowedModels: [{ provider: 'old', model: 'x' }] };
+  const page = { getSection: () => section };
+  const ctx = fakeCtx({
+    current: () => gate,
+    revision: 11,
+    update(ns, patch) { gate = { ...patch }; }
+  });
+  assert.equal((await syncHostWhitelist(ctx, page)).synced, true);
+
+  // A human changes the gate to a route this page never listed.
+  gate = { enabled: true, allowedModels: [{ provider: 'manual', model: 'keep-me' }] };
+  page.getSection = () => ({});
+  const outcome = await syncHostWhitelist(ctx, page);
+  assert.equal(outcome.synced, false);
+  assert.equal(outcome.reason, 'not-owned');
+  assert.deepEqual(gate.allowedModels, [{ provider: 'manual', model: 'keep-me' }], 'the manual edit survives');
+  assert.equal(page.hostWhitelistMirror, undefined, 'ownership is dropped once someone else edited it');
+});
+
+test('an empty page never touches a gate this plugin never mirrored', async () => {
+  const ctx = fakeCtx({ current: { enabled: true, allowedModels: [{ provider: 'manual', model: 'keep' }] }, revision: 2 });
+  const outcome = await syncHostWhitelist(ctx, { getSection: () => ({}) });
+  assert.equal(outcome.reason, 'no-models');
+  assert.equal(ctx.writes.length, 0);
 });
 
 test('a spawn mirrors the page into the gate before the child is built', async () => {

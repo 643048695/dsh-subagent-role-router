@@ -71,12 +71,24 @@ test('pool birth policy replaces a caller-written model with the role pool',asyn
   assert.equal(result.request.agentOptions.model,'explore');
   assert.equal(result.request.agentOptions.maxTokens,8192);h.dispose();
 });
-test('explicit birth policy keeps the old let-it-through contract',async()=>{
+test('explicit birth policy lets a full route through and refuses a short/ambiguous id',async()=>{
+  // The explicit policy still takes responsibility for a caller's FULL route,
+  // but a bare short name is never handed to the host unchanged: it must be
+  // resolved to one configured route or refused. Both halves are the contract.
   const h=harness({...config,birthRoutePolicy:'explicit'});
-  const agentOptions={provider:'memory',model:'fixed',maxTokens:8192};
-  const request={parent:h.parent,prompt:'review the failing test',agentOptions};
+  const full={provider:'memory',model:'memory/fixed',maxTokens:8192};
+  const request={parent:h.parent,prompt:'review the failing test',agentOptions:full};
   const result=await h.raw.startActivation({provider:'spawn',label:'code review helper',request});
-  assert.equal(result.request,request);h.dispose();
+  assert.equal(result.request,request,'a full provider/model route keeps the explicit-policy pass-through');
+  await assert.rejects(
+    h.raw.startActivation({
+      provider:'spawn',
+      label:'code review helper',
+      request:{parent:h.parent,prompt:'review the failing test',agentOptions:{provider:'memory',model:'fixed',maxTokens:8192}}
+    }),
+    (error)=>error?.code==='BIRTH_ROUTE_AMBIGUOUS',
+    'a short model id under an explicit policy is refused instead of reaching the host'
+  );h.dispose();
 });
 test('token-only options get role default without dropping maxTokens or tool policy',async()=>{
   const h=harness(); const toolFilter={allow:['read','edit']};
@@ -94,7 +106,7 @@ test('round-robin is once per child, never once per request',async()=>{
 });
 test('concurrent team fork is unchanged while ordinary fork is sliced; parent untouched',async()=>{
   const h=harness();const snapshot=h.parent.session.snapshotEvents;
-  const team={provider:'fork',label:'agent-teams:team:成员',request:{parent:h.parent,prompt:'work',agentOptions:{provider:'team',model:'team-model'}}};
+  const team={provider:'fork',label:'agent-teams:team:成员',request:{parent:h.parent,prompt:'work',agentOptions:{provider:'team',model:'team/team-model'}}};
   const ordinary={provider:'fork',label:'michengai-btw:question',request:{parent:h.parent,prompt:'explain'}};
   const [t,b]=await Promise.all([h.raw.startContinuable(team),h.raw.startContinuable(ordinary)]);
   assert.equal(t.spec,team);assert.equal(t.seed,h.seed);assert.equal(t.boundary,h.seed.length);
@@ -166,20 +178,45 @@ function poolHarness(overrides = {}) {
     dispose() { for (const fn of cleanups.reverse()) fn(); } };
 }
 
+// ── the recovery contract on a fixture ──────────────────────────────────────
+//
+// The plugin no longer answers the host's `agent/request-error` waterfall with
+// `{ kind: "retry" }`: a retry re-runs the SAME frozen selection, so it is not a
+// route change. The live switch is `model.select(target)` + `cancel({kind:"hook"},
+// {keepInbox:true})` + `followup(continuation)` in ONE synchronous window, and
+// the handler returns `undefined`. Tests therefore need an agent that exposes the
+// same three functions and records them, plus a mutable served route so a
+// second failure is attributed to the NEW selection rather than the previous one.
 const subagent = (id, served, withSelect = false) => {
+  const state = { ...served };
+  const cancels = [];
+  const followups = [];
+  const selects = [];
   const agent = {
     id,
+    status: 'running',
+    cancels,
+    followups,
     session: {
       header: { origin: 'subagent' },
       snapshotEvents: () => [],
-      requestContext: () => served
-    }
+      requestContext: () => ({ ...state })
+    },
+    cancel(cause, options) { cancels.push({ cause, options }); },
+    followup(message) { followups.push(message); }
   };
   if (withSelect) {
-    // The host's front door (`model.select`), recorded so tests can assert
-    // exactly which selection was pushed onto the child.
-    const selects = [];
-    agent.model = { selects, select(selection) { selects.push({ ...selection }); } };
+    // The host's front door (`model.select`) and its durable selection fold.
+    // A selection moves `served` too: the NEXT request context is the new route.
+    agent.model = {
+      selects,
+      current: () => ({ ...state }),
+      select(selection) {
+        selects.push({ ...selection });
+        state.provider = selection.provider;
+        state.model = selection.model;
+      }
+    };
   }
   return agent;
 };
@@ -258,23 +295,37 @@ test('an off-list birth model is replaced by the pool and occupies a lane (defau
   h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'pooled'}});
   assert.deepEqual(h.models(),['m1','m2']);h.dispose();
 });
-test('a birth pick on the page whitelist is honoured under the default policy',async()=>{
-  // A pick that names a route the page configures IS a real choice: the exact
-  // pair matches, a renamed provider with the same model matches, and a bare
-  // short name matches. Honoured picks bypass pool routing and occupy no lane
-  // — the next pooled spawn still starts from the head of the pool.
+test('birth picks follow the page whitelist: exact provider survives, unknown provider is replaced, model-only normalizes',async()=>{
+  // Provider-tuple semantics, made explicit:
+  //   * an EXACT provider+model pair is the page's route: honoured, no lane;
+  //   * an UNKNOWN provider is NOT approved just because the model name also
+  //     appears on the page — gateway aliases are not interchangeable for a
+  //     birth handoff, so the pick falls through to the role pool and is
+  //     replaced by that pool's exact pair (and drops the rejected route's
+  //     inherited effort);
+  //   * a MODEL-ONLY pick that names exactly one configured route is normalized
+  //     to that route's provider+model (a short name must never reach the host).
+  // Honoured picks bypass pool routing and occupy no lane — the pooled spawn
+  // still starts from the next free lane.
   const h=poolHarness();
   h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'exact',agentOptions:{provider:'p',model:'m2'}}});
-  h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'renamed provider',agentOptions:{provider:'gateway-alias',model:'base-b'}}});
-  h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'short name',agentOptions:{model:'m3'}}});
+  h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'renamed provider',agentOptions:{provider:'gateway-alias',model:'base-b',reasoningEffort:'xhigh'}}});
+  h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'model only',agentOptions:{model:'m3'}}});
   h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'pooled'}});
-  assert.deepEqual(h.models(),['m2','base-b','m3','m1']);h.dispose();
+  const born=h.seen.map((spec)=>spec.request.agentOptions);
+  assert.deepEqual(born[0],{provider:'p',model:'m2'},'the exact configured provider/model is honoured unchanged');
+  assert.deepEqual(born[1],{provider:'p',model:'m1'},'an unknown provider is replaced by the role pool, effort included');
+  assert.deepEqual(born[2],{provider:'p',model:'m3'},'a model-only pick is normalized to the one configured route');
+  assert.deepEqual(born[3],{provider:'p',model:'m2'},'the pooled spawn starts from the next free lane (m1 is busy)');
+  assert.deepEqual(h.models(),['m2','m1','m3','m2']);h.dispose();
 });
 test('an explicit model bypasses the pool and occupies no lane under the explicit policy',async()=>{
   const h=poolHarness({birthRoutePolicy:'explicit'});
-  h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'pinned',agentOptions:{provider:'x',model:'y'}}});
+  h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'pinned',agentOptions:{provider:'x',model:'x/y'}}});
   h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'pooled'}});
-  assert.deepEqual(h.models(),['y','m1']);h.dispose();
+  assert.deepEqual(h.seen[0].request.agentOptions,{provider:'x',model:'x/y'},
+    'the explicit policy lets a full provider/model route through unchanged');
+  assert.deepEqual(h.models(),['x/y','m1']);h.dispose();
 });
 
 test('a role failure fails over inside its own pool, not the base pool',async()=>{
@@ -282,12 +333,19 @@ test('a role failure fails over inside its own pool, not the base pool',async()=
   h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'work'}});
   const child=h.pending[0];
   const agent=subagent(child.childId,{provider:'p',model:'m1'},true);
-  const retry=await h.waterfall('agent/request-error',{agent,turn:1,step:1,failure:{code:'TIMEOUT'}},undefined);
-  assert.deepEqual(retry,{kind:'retry'});
-  // The front door selected the role pool's second entry for the NEXT step the
-  // moment the failure was seen; the rebuilt request itself is never rewritten
-  // (the host freezes the selection and throws on a proposal that differs).
+  const outcome=await h.waterfall('agent/request-error',{agent,turn:1,step:1,failure:{code:'TIMEOUT'}},undefined);
+  // THE NEW CONTRACT: no retry verdict — the plugin selects the next candidate
+  // and cuts+resumes the in-flight attempt in one synchronous window.
+  assert.equal(outcome,undefined);
   assert.deepEqual(agent.model.selects,[{provider:'p',model:'m2'}]);
+  assert.equal(agent.cancels.length,1);
+  assert.deepEqual(agent.cancels[0],{cause:{kind:'hook',reason:'error-switch'},options:{keepInbox:true}});
+  assert.equal(agent.followups.length,1,'the cut attempt is resumed on the new route');
+  assert.equal(agent.followups[0].source.form,'failover-continuation');
+  assert.match(agent.followups[0].content.map((part)=>part.text).join(''),/p\/m2/);
+  // The rebuilt request itself is never rewritten (the host freezes the
+  // selection and throws on a proposal that differs); the target is re-picked
+  // through the front door while the seed still lags.
   const seed={provider:'p',model:'m1',reasoningEffort:'max',maxTokens:100};
   const switched=await h.waterfall('agent/request',{agent},seed);
   assert.deepEqual(switched,seed);
@@ -333,9 +391,13 @@ test('an unusable candidate also fails over inside its own pool',async()=>{
   const h=poolHarness({patchModels:[{provider:'p',model:'m1'},{provider:'p',model:'m2'}]});
   h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'work'}});
   const agent=subagent(h.pending[0].childId,{provider:'p',model:'m1'},true);
-  const retry=await h.waterfall('agent/request-error',{agent,turn:1,step:1,failure:{code:'UNKNOWN_MODEL',message:'no such model'}},undefined);
-  assert.deepEqual(retry,{kind:'retry'});
+  const outcome=await h.waterfall('agent/request-error',{agent,turn:1,step:1,failure:{code:'UNKNOWN_MODEL',message:'no such model'}},undefined);
+  assert.equal(outcome,undefined,'a switch is a cut+resume, never a retry verdict');
   assert.deepEqual(agent.model.selects,[{provider:'p',model:'m2'}]);
+  assert.equal(agent.cancels.length,1);
+  assert.deepEqual(agent.cancels[0],{cause:{kind:'hook',reason:'error-switch'},options:{keepInbox:true}});
+  assert.equal(agent.followups.length,1,'the resumed task is queued in the same window');
+  assert.equal(agent.followups[0].source.form,'failover-continuation');
   const switched=await h.waterfall('agent/request',{agent},{provider:'p',model:'m1'});
   assert.deepEqual(switched,{provider:'p',model:'m1'});h.dispose();
 });
@@ -344,15 +406,22 @@ test('an unexplained 400 switches once, then the real error surfaces',async()=>{
   // REVERSED ON PURPOSE (live session-7a929cab): the gateway answered a
   // perfectly good coordinator step with a bare 400 and the child stopped dead.
   // A subagent now moves to the next candidate on ANY failure except a
-  // cancellation; the per-run cap keeps it to one round trip per candidate, so
-  // a genuinely malformed request still surfaces (as the real error) instead of
-  // looping forever. See test/failover-revert.test.mjs for the full contract.
+  // cancellation; the per-episode failed set keeps it to one round trip per
+  // candidate, so a genuinely malformed request still surfaces (as the real
+  // error) instead of looping forever.
   const h=poolHarness({patchModels:[{provider:'p',model:'m1'},{provider:'p',model:'m2'}]});
   h.raw.startActivation({provider:'spawn',label:'general task',request:{parent:h.parent,prompt:'work'}});
-  const agent=subagent(h.pending[0].childId,{provider:'p',model:'m1'});
-  const retry=await h.waterfall('agent/request-error',{agent,turn:1,step:1,failure:{code:'INVALID_REQUEST',message:'messages[2].content: expected string'}},undefined);
-  assert.deepEqual(retry,{kind:'retry'});
+  const agent=subagent(h.pending[0].childId,{provider:'p',model:'m1'},true);
+  const outcome=await h.waterfall('agent/request-error',{agent,turn:1,step:1,failure:{code:'INVALID_REQUEST',message:'messages[2].content: expected string'}},undefined);
+  assert.equal(outcome,undefined,'the first failure switches instead of asking for a retry');
+  assert.deepEqual(agent.model.selects,[{provider:'p',model:'m2'}]);
+  assert.equal(agent.cancels.length,1);
+  assert.deepEqual(agent.cancels[0],{cause:{kind:'hook',reason:'error-switch'},options:{keepInbox:true}});
+  assert.equal(agent.followups.length,1);
   const sentinel={kind:'continue'};
+  // The second failure is attributed to the NEW selection (the fixture moves
+  // `served` on select), and both candidates are now in the failed episode.
   const surfaced=await h.waterfall('agent/request-error',{agent,turn:1,step:2,failure:{code:'INVALID_REQUEST',message:'messages[2].content: expected string'}},sentinel);
-  assert.equal(surfaced,sentinel,'the pool is exhausted after one switch, so the error must reach the user');h.dispose();
+  assert.equal(surfaced,sentinel,'the pool is exhausted after one switch, so the error must reach the user');
+  assert.equal(agent.cancels.length,1,'nothing else was cut once the candidates ran out');h.dispose();
 });

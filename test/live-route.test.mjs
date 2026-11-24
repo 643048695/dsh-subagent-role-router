@@ -78,6 +78,23 @@ function harness(settings = config) {
       if (key === 'agents') {
         return { get: (id) => agents.get(id) };
       }
+      // The rc.5 host catalog: the child rows THE PARENT owns. The write
+      // endpoints re-read membership from here (a live id alone is not proof),
+      // so the fixture mirrors that authority instead of relying on headers.
+      if (key === 'subagents') {
+        return {
+          async listDescendants(root) {
+            const forms = [root, root.startsWith('session-') ? root.slice(8) : 'session-' + root];
+            const rows = [];
+            for (const agent of agents.values()) {
+              const header = agent.session?.header ?? {};
+              if (header.origin !== 'subagent' || !forms.includes(header.parentSession)) continue;
+              rows.push({ id: agent.id, mode: 'continuable', label: header.label ?? agent.id, parentId: header.parentSession, depth: 1 });
+            }
+            return rows;
+          }
+        };
+      }
       return undefined;
     }
   };
@@ -143,14 +160,22 @@ function harness(settings = config) {
    * now mirrors the real split so that gap cannot reopen.
    */
   function liveChild(id, route = { provider: 'p', model: 'general' }, opts = {}) {
+    const cancels = [];
+    const followups = [];
     const agent = {
       id,
+      status: 'running',
       session: {
-        header: { origin: 'subagent', label: id },
+        id,
+        header: { origin: 'subagent', label: id, parentSession: 'parent-1' },
         requestContext: () => ({ provider: route.provider, model: route.model, contextWindow: 1000 }),
         requestHeader: () => ({ config: { ...route } }),
         snapshotEvents: () => []
       },
+      cancel(cause, options) { cancels.push({ cause, options }); },
+      followup(message) { followups.push(message); },
+      cancels,
+      followups,
       options: { provider: 'parent', model: 'parent' }
     };
     if (opts.withModelSelect) {
@@ -255,23 +280,31 @@ test('an override written while the child is idle lands through the front door o
   h.dispose();
 });
 
-test('failover stays out of the way while an override is live', async () => {
+test('a live override is withdrawn on failure instead of vetoing the switch', async () => {
   const h = harness();
-  const child = h.liveChild('child-1');
+  const child = h.liveChild('child-1', { provider: 'p', model: 'general' }, { withModelSelect: true });
 
-  // Without an override the pool owns the child: a retryable failure is
-  // answered with {kind:'retry'} so the next attempt lands on another model.
-  const retried = await h.error(child, { code: 'TIMEOUT', message: 'slow' }, { kind: 'continue' });
-  assert.deepEqual(retried, { kind: 'retry' });
+  // Without an override the pool owns the child: the failing attempt is cut
+  // and resumed on the next candidate — the hook never claims `retry`, because
+  // the host reuses the frozen selection on a retry.
+  const switched = await h.error(child, { code: 'TIMEOUT', message: 'slow' }, { kind: 'continue' });
+  assert.equal(switched, undefined, h.warnings.join(' | ') || 'a handled switch does not ask the loop to retry the dead route');
+  assert.deepEqual(child.model.selects, [{ provider: 'p', model: 'a' }]);
+  assert.equal(child.cancels.length, 1);
+  assert.equal(child.followups.length, 1);
 
   await h.call({ path: '/subagent-role-router/select', body: { childId: 'child-1', provider: 'q', model: 'b' } });
 
-  // With an override live the user has named the model, so an automatic swap
-  // would silently overrule that pick. The failure must surface instead, and no
-  // cooldown may be recorded against a model the plugin never chose.
-  const surfaced = await h.error(child, { code: 'TIMEOUT', message: 'slow' }, { kind: 'continue' });
-  assert.deepEqual(surfaced, { kind: 'continue' });
-  assert.equal(h.warnings.filter((line) => line.includes('cooling down')).length, 0);
+  // With an override live the user has named the model. "Revert, do not stop"
+  // still wins: the pick is withdrawn and the page's list continues. The
+  // cooldown is recorded against the route that actually failed, never the
+  // fallback the plugin chose.
+  const afterPick = await h.error(child, { code: 'TIMEOUT', message: 'slow' }, { kind: 'continue' });
+  assert.equal(afterPick, undefined);
+  assert.deepEqual(child.model.selects.at(-1), { provider: 'p', model: 'a' });
+  assert.equal(child.cancels.length, 2);
+  const route = await h.call({ method: 'GET', path: '/subagent-role-router/route?childId=child-1', body: undefined });
+  assert.equal(route.body.value.override, null, 'the dead pick must be withdrawn');
   h.dispose();
 });
 
@@ -279,13 +312,18 @@ test('a failover switch is applied through the front door, not the waterfall', a
   const h = harness();
   const child = h.liveChild('child-1', { provider: 'p', model: 'general' }, { withModelSelect: true });
 
-  const retried = await h.error(child, { code: 'TIMEOUT', message: 'slow' }, { kind: 'continue' });
-  assert.deepEqual(retried, { kind: 'retry' });
+  const outcome = await h.error(child, { code: 'TIMEOUT', message: 'slow' }, { kind: 'continue' });
+  assert.equal(outcome, undefined);
   // The in-flight retry keeps the failing route (the loop retains the frozen
   // selection across retries — the host allows nothing else); the target for
   // the NEXT step is selected here, the moment the failure is seen. The served
   // route is not in the pool, so round-robin starts at entry 0 (p/a).
   assert.deepEqual(child.model.selects, [{ provider: 'p', model: 'a' }]);
+  assert.equal(child.cancels[0].cause.kind, 'hook');
+  assert.deepEqual(child.cancels[0].options, { keepInbox: true });
+  // The seed is still handed back EXACTLY as the host built it.
+  const seeded = { provider: 'p', model: 'general', maxTokens: 4096 };
+  assert.equal(await h.request(childPayload(child), seeded), seeded);
   h.dispose();
 });
 
@@ -345,7 +383,7 @@ test('an unknown or finished child is refused instead of silently accepted', asy
   h.agents.set('main-1', { id: 'main-1', session: { header: {}, requestContext: () => ({}) } });
   const main = await h.call({ path: '/subagent-role-router/select', body: { childId: 'main-1', provider: 'q', model: 'b' } });
   assert.equal(main.body.ok, false);
-  assert.equal(main.body.error.code, 'not-live');
+  assert.equal(main.body.error.code, 'not-child', 'a live main agent is not a child, and says so');
   h.dispose();
 });
 

@@ -35,7 +35,20 @@ function loadClient() {
   const fetchCalls = [];
   // The live-route poll reads everything through the sandbox `fetch`; each
   // test points `routeAnswer` at the envelope the next GET should return.
+  // `postAnswer` is the same seam for /select and /clear. Either may return a
+  // promise so a slow response can be raced against a newer one.
   let routeAnswer = null;
+  let postAnswer = null;
+  // Page-level route stream: the component subscribes to it on mount, so a
+  // test can deliver an external "route moved" frame at an exact moment.
+  const eventSources = [];
+  function FakeEventSource(url) {
+    this.url = url;
+    this.readyState = 0;
+    this.closed = false;
+    eventSources.push(this);
+  }
+  FakeEventSource.prototype.close = function () { this.readyState = 2; this.closed = true; };
 
   const sandbox = {
     window: {
@@ -63,10 +76,15 @@ function loadClient() {
       removeEventListener() {}
     },
     console,
+    EventSource: FakeEventSource,
     fetch: async (path, init) => {
       fetchCalls.push({ path, method: init && init.method });
       if (String(path).indexOf("/route?") !== -1) {
         const answer = typeof routeAnswer === "function" ? routeAnswer() : routeAnswer;
+        return { json: async () => answer };
+      }
+      if (String(path).indexOf("/select") !== -1 || String(path).indexOf("/clear") !== -1) {
+        const answer = typeof postAnswer === "function" ? postAnswer(path) : postAnswer;
         return { json: async () => answer };
       }
       return { json: async () => ({ ok: false, error: { code: "unmocked" } }) };
@@ -243,7 +261,7 @@ function loadClient() {
       let guard = 0;
       while (session.dirty && guard < 100) {
         session.dirty = false;
-        draw(harness.props);
+        harness.current = draw(harness.props);
       }
       return harness.current;
     },
@@ -275,6 +293,23 @@ function loadClient() {
     setRouteAnswer(next) {
       routeAnswer = next;
     },
+    setPostAnswer(next) {
+      postAnswer = next;
+    },
+    /** Deliver one frame the way the page-level EventSource does. */
+    emitSse(event) {
+      const es = eventSources[eventSources.length - 1];
+      if (!es || typeof es.onmessage !== "function") throw new Error("no live route stream");
+      es.onmessage({ data: JSON.stringify(event) });
+    },
+    /** Run the pending timer with this delay (route GET timeout, etc.). */
+    fireTimer(ms) {
+      const at = timers.findIndex((timer) => timer.ms === ms);
+      if (at === -1) throw new Error("no timer with ms=" + ms);
+      const timer = timers[at];
+      timers.splice(at, 1);
+      timer.fn();
+    },
     unmount() {
       for (const slot of session.slots) {
         if (slot && typeof slot.cleanup === "function") {
@@ -292,6 +327,55 @@ const PICKER_PROPS = (sid, sessionsList) => (
     ? { sessionId: sid, useSessions: () => true, sessionsList }
     : { sessionId: sid, useSessions: () => true }
 );
+
+/** A promise whose settlement the test decides. */
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function findByClass(node, className) {
+  let found = null;
+  const walk = (current) => {
+    if (!current || typeof current !== "object" || found) return;
+    if (typeof current.props?.className === "string"
+      && current.props.className.split(/\s+/).includes(className)) {
+      found = current;
+      return;
+    }
+    for (const child of current.children || []) walk(child);
+  };
+  walk(node);
+  return found;
+}
+
+function allText(node) {
+  const out = [];
+  const walk = (current) => {
+    if (!current || typeof current !== "object") return;
+    for (const child of current.children || []) {
+      if (typeof child === "string") out.push(child);
+    }
+    for (const child of current.children || []) walk(child);
+  };
+  walk(node);
+  return out.join(" ");
+}
+
+function findRefreshError(node) {
+  let found = null;
+  const walk = (current) => {
+    if (!current || typeof current !== "object" || found) return;
+    if (current.props && current.props["data-refresh-error"] === "1") {
+      found = current;
+      return;
+    }
+    for (const child of current.children || []) walk(child);
+  };
+  walk(node);
+  return found;
+}
 
 test("1. a revision-only route change re-runs the adopt effect and rewrites the cache", async () => {
   const h = loadClient();
@@ -430,4 +514,252 @@ test("6. wrapDirectory override branch: adopt into cache and store (regression)"
   assert.deepEqual(plain(dir.__srrCurrentSelection), { provider: "ov", model: "ovm", reasoningEffort: "low" });
   assert.deepEqual(plain(storeState.current), { provider: "ov", model: "ovm", reasoningEffort: "low" });
   handle.dispose();
+});
+
+async function settle(h) {
+  await flush();
+  h.act();
+  await flush();
+  h.act();
+}
+
+test("7. a GET already in flight cannot overwrite a newer POST", async () => {
+  const h = loadClient();
+  const sid = "child-race";
+  const held = deferred();
+  const initial = {
+    ok: true,
+    value: { provider: "p1", model: "m1", reasoningEffort: "", override: { provider: "p2", model: "m2", reasoningEffort: "high" }, revision: 1 }
+  };
+  const tail = {
+    ok: true,
+    value: { provider: "p1", model: "m-tail", reasoningEffort: "", override: null, revision: 3 }
+  };
+  let gets = 0;
+  h.setRouteAnswer(() => {
+    gets += 1;
+    if (gets === 1) return initial;
+    if (gets === 2) return held.promise; // still in flight when the POST lands
+    return tail;
+  });
+  h.setPostAnswer(() => ({
+    ok: true,
+    value: { provider: "p1", model: "m-post", reasoningEffort: "", override: null, revision: 2 }
+  }));
+
+  await h.render(PICKER_PROPS(sid, h.sessionsList));
+  const reset = findByClass(h.current, "dsm-live-route-reset");
+  assert.ok(reset, "the override renders the reset control");
+
+  // A store flush starts a second GET; hold its answer.
+  await h.triggerStoreSync(sid);
+  assert.equal(gets, 2, "the store change started the racing GET");
+
+  reset.props.onClick();
+  await settle(h);
+
+  var methods = h.fetchCalls.map((call) => call.method + " " + String(call.path).split("/").pop());
+  assert.ok(methods.some((entry) => entry === "POST clear"), "the reset actually wrote");
+  const tailCall = h.fetchCalls.findIndex((call, index) => index > h.fetchCalls.findIndex((entry) => entry.method === "POST") && call.method === "GET");
+  assert.ok(tailCall !== -1, "a POST must be followed by a tail GET");
+  assert.match(allText(h.current), /m-tail/, "the server's tail state is painted");
+
+  // Now let the pre-write GET answer. Its generation is stale, so it must be
+  // dropped instead of repainting m-old over m-tail.
+  held.resolve({
+    ok: true,
+    value: { provider: "p1", model: "m-old", reasoningEffort: "", override: { provider: "p2", model: "m2", reasoningEffort: "high" }, revision: 1 }
+  });
+  await settle(h);
+  assert.match(allText(h.current), /m-tail/, "the late GET answer must not overwrite the write");
+  assert.doesNotMatch(allText(h.current), /m-old/);
+  h.unmount();
+});
+
+test("8. a write is tail-verified even when no GET was racing it", async () => {
+  const h = loadClient();
+  const sid = "child-tail";
+  const initial = {
+    ok: true,
+    value: { provider: "p1", model: "m1", reasoningEffort: "", override: { provider: "p2", model: "m2", reasoningEffort: "high" }, revision: 1 }
+  };
+  const tail = {
+    ok: true,
+    value: { provider: "p1", model: "m-settled", reasoningEffort: "", override: null, revision: 4, pending: false }
+  };
+  let gets = 0;
+  h.setRouteAnswer(() => {
+    gets += 1;
+    return gets === 1 ? initial : gets === 2 ? tail : tail;
+  });
+  h.setPostAnswer(() => ({
+    ok: true,
+    value: { provider: "p1", model: "m-post", reasoningEffort: "", override: null, revision: 2, pending: true }
+  }));
+
+  await h.render(PICKER_PROPS(sid, h.sessionsList));
+  const reset = findByClass(h.current, "dsm-live-route-reset");
+  assert.ok(reset);
+  reset.props.onClick();
+  await settle(h);
+
+  assert.equal(gets, 2, "the write response is followed by exactly one tail GET");
+  assert.match(allText(h.current), /m-settled/, "the tail answer wins over the write response");
+  h.unmount();
+});
+
+test("9. an external SSE seen while a GET is in flight queues one follow-up verify", async () => {
+  const h = loadClient();
+  const sid = "child-queued";
+  const held = deferred();
+  const initial = { ok: true, value: { provider: "p1", model: "m1", reasoningEffort: "", override: null, revision: 1 } };
+  const updated = { ok: true, value: { provider: "p1", model: "m-new", reasoningEffort: "", override: null, revision: 5 } };
+  let gets = 0;
+  h.setRouteAnswer(() => {
+    gets += 1;
+    if (gets === 1) return initial;
+    if (gets === 2) return held.promise;
+    return updated;
+  });
+  await h.render(PICKER_PROPS(sid, h.sessionsList));
+  await h.triggerStoreSync(sid);
+  assert.equal(gets, 2, "a second GET is on the wire");
+
+  // The external signal must not be swallowed just because a GET is in flight.
+  h.emitSse({ type: "route", childId: sid });
+  assert.equal(gets, 2, "the queued verify waits for the wire to clear");
+
+  held.resolve({ ok: true, value: { provider: "p1", model: "m-old", reasoningEffort: "", override: null, revision: 1 } });
+  await settle(h);
+  assert.equal(gets, 3, "exactly one follow-up GET ran after the in-flight answer");
+  assert.match(allText(h.current), /m-new/, "the queued verify's answer is painted");
+  assert.doesNotMatch(allText(h.current), /m-old/);
+  h.unmount();
+});
+
+test("10. a hung GET times out, the slot is freed, and the next signal verifies", async () => {
+  const h = loadClient();
+  const sid = "child-hung";
+  const held = deferred();
+  const initial = { ok: true, value: { provider: "p1", model: "m1", reasoningEffort: "", override: null, revision: 1 } };
+  const later = { ok: true, value: { provider: "p1", model: "m-after-timeout", reasoningEffort: "", override: null, revision: 6 } };
+  let gets = 0;
+  h.setRouteAnswer(() => {
+    gets += 1;
+    if (gets === 1) return initial;
+    if (gets === 2) return held.promise; // never settles before the timeout
+    return later;
+  });
+  await h.render(PICKER_PROPS(sid, h.sessionsList));
+  await h.triggerStoreSync(sid);
+  assert.equal(gets, 2);
+
+  h.fireTimer(h.client.routeGetTimeoutMs);
+  h.emitSse({ type: "route", childId: sid });
+  await settle(h);
+  assert.equal(gets, 3, "the timeout released the in-flight slot");
+  assert.match(allText(h.current), /m-after-timeout/);
+
+  // A late answer from the hung request must stay fenced off.
+  held.resolve({ ok: true, value: { provider: "p1", model: "m-hung", reasoningEffort: "", override: null, revision: 1 } });
+  await settle(h);
+  assert.doesNotMatch(allText(h.current), /m-hung/);
+  h.unmount();
+});
+
+test("11. a write invalidates a verify queued against the older GET", async () => {
+  const h = loadClient();
+  const sid = "child-invalidate";
+  const held = deferred();
+  const initial = {
+    ok: true,
+    value: { provider: "p1", model: "m1", reasoningEffort: "", override: { provider: "p2", model: "m2", reasoningEffort: "high" }, revision: 1 }
+  };
+  const tail = { ok: true, value: { provider: "p1", model: "m-tail", reasoningEffort: "", override: null, revision: 3 } };
+  let gets = 0;
+  h.setRouteAnswer(() => {
+    gets += 1;
+    if (gets === 1) return initial;
+    if (gets === 2) return held.promise;
+    return tail;
+  });
+  h.setPostAnswer(() => ({
+    ok: true,
+    value: { provider: "p1", model: "m-post", reasoningEffort: "", override: null, revision: 2 }
+  }));
+
+  await h.render(PICKER_PROPS(sid, h.sessionsList));
+  await h.triggerStoreSync(sid);
+  assert.equal(gets, 2);
+  h.emitSse({ type: "route", childId: sid });
+
+  const reset = findByClass(h.current, "dsm-live-route-reset");
+  assert.ok(reset);
+  reset.props.onClick();
+  await settle(h);
+  assert.equal(gets, 3, "the write's tail GET is the only follow-up");
+
+  held.resolve({
+    ok: true,
+    value: { provider: "p1", model: "m-old", reasoningEffort: "", override: { provider: "p2", model: "m2", reasoningEffort: "high" }, revision: 1 }
+  });
+  await settle(h);
+  assert.equal(gets, 3, "the invalidated queue must not replay a fourth GET");
+  assert.match(allText(h.current), /m-tail/);
+  h.unmount();
+});
+
+test("12. a transient refresh failure keeps the confirmed route and says so inline", async () => {
+  const h = loadClient();
+  const sid = "child-refresh-fail";
+  h.setRouteAnswer({
+    ok: true,
+    value: { provider: "p1", model: "m1", reasoningEffort: "", override: null, revision: 1 }
+  });
+  await h.render(PICKER_PROPS(sid, h.sessionsList));
+  assert.match(allText(findByClass(h.current, "dsm-live-route-trigger")), /m1/);
+
+  // Transport/JSON failure: `liveRouteRequest` answers null. The control must
+  // stay on the last confirmed route and explain the failed refresh.
+  h.setRouteAnswer(() => null);
+  await h.triggerStoreSync(sid);
+  await settle(h);
+  const trigger = findByClass(h.current, "dsm-live-route-trigger");
+  assert.ok(trigger, "a failed refresh must not remove the model control");
+  assert.match(allText(trigger), /m1/, "the last confirmed route is still shown");
+  trigger.props.onClick();
+  h.act();
+  const inline = findRefreshError(h.current);
+  assert.ok(inline, "the menu carries an inline refresh-failure message");
+  assert.match(allText(inline), /live\.refreshFailed/, "the message is the refresh copy, not a switch failure");
+
+  // The next successful GET clears the transient message.
+  h.setRouteAnswer({
+    ok: true,
+    value: { provider: "p1", model: "m2", reasoningEffort: "", override: null, revision: 2 }
+  });
+  await h.triggerStoreSync(sid);
+  await settle(h);
+  assert.equal(findRefreshError(h.current), null, "a recovered refresh clears the message");
+  assert.match(allText(findByClass(h.current, "dsm-live-route-trigger")), /m2/);
+  h.unmount();
+});
+
+test("13. an authoritative not-live answer hides the control instead of keeping a stale route", async () => {
+  const h = loadClient();
+  const sid = "child-not-live";
+  h.setRouteAnswer({
+    ok: true,
+    value: { provider: "p1", model: "m1", reasoningEffort: "", override: null, revision: 1 }
+  });
+  await h.render(PICKER_PROPS(sid, h.sessionsList));
+  assert.ok(findByClass(h.current, "dsm-live-route-trigger"));
+
+  h.setRouteAnswer({ ok: false, error: { code: "not-live" } });
+  await h.triggerStoreSync(sid);
+  await settle(h);
+  assert.equal(findByClass(h.current, "dsm-live-route-trigger"), null,
+    "a child the server declares gone gets no switch control");
+  assert.equal(findRefreshError(h.current), null, "not-live is not reported as a refresh failure");
+  h.unmount();
 });

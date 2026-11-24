@@ -80,6 +80,21 @@ function harness(settings = config) {
     },
     get(key) {
       if (key === 'agents') return { get: (id) => agents.get(id) };
+      // The write endpoints verify membership against the host's parent catalog.
+      if (key === 'subagents') {
+        return {
+          async listDescendants(root) {
+            const forms = [root, root.startsWith('session-') ? root.slice(8) : 'session-' + root];
+            const rows = [];
+            for (const agent of agents.values()) {
+              const header = agent.session?.header ?? {};
+              if (header.origin !== 'subagent' || !forms.includes(header.parentSession)) continue;
+              rows.push({ id: agent.id, mode: 'continuable', label: header.label ?? agent.id, parentId: header.parentSession, depth: 1 });
+            }
+            return rows;
+          }
+        };
+      }
       return undefined;
     }
   };
@@ -126,7 +141,7 @@ function harness(settings = config) {
     const agent = {
       id,
       session: {
-        header: { origin: 'subagent', label: id },
+        header: { origin: 'subagent', label: id, parentSession: 'parent-1' },
         requestContext: () => ({ provider: 'codex', model: 'gpt-6.1-sol', contextWindow: 1000 }),
         requestHeader: () => ({ config: { provider: 'codex', model: 'gpt-6.1-sol' } }),
         snapshotEvents: () => []
@@ -148,7 +163,7 @@ const childPayload = (agent) => ({ turn: 0, step: 0, agent });
 test('an approved route needs no substitute', () => {
   assert.equal(pickWhitelistRoute(config, { provider: 'p', model: 'a' }), null);
   assert.equal(pickWhitelistRoute(config, { provider: 'p', model: 'general' }), null, 'a role pool route counts as approved');
-  assert.equal(pickWhitelistRoute(config, { provider: 'whatever', model: 'explore' }), null, 'the model name alone is enough (gateway aliases rename providers)');
+  assert.deepEqual(pickWhitelistRoute(config, { provider: 'whatever', model: 'explore' }), { provider: 'p', model: 'explore' }, 'another provider is not approved; normalize to the configured exact pair');
   // A name the page never listed is switched even when no provider came with
   // it: "not on this page" is the whole test, and there is no guesswork in
   // picking the substitute (first route, or the asked provider's own entry).

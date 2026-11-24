@@ -26,14 +26,20 @@ const flush = async () => {
 
 const plain = (value) => JSON.parse(JSON.stringify(value));
 
-function loadCritters() {
+function loadCritters(opts) {
   let capturedModule = null;
   let capturedCss = "";
   const storeListeners = [];
   let storeSnapshot = { byId: {} };
+  // The host's `useSessionStatus` map: `ui-session` publishes it from the
+  // remote status stream, so it can know a child is running before (or after)
+  // the list row says so. The component must follow it first.
+  let statusSnapshot = new Map();
+  const batchChildren = opts && Array.isArray(opts.batchChildren) ? opts.batchChildren : null;
   const session = {
     cursor: 0,
     hookCursor: 0,
+    statusCursor: 0,
     effects: [],
     slots: [],
     dirty: false,
@@ -43,6 +49,16 @@ function loadCritters() {
     fetchCalls: []
   };
   let nextTimerId = 1;
+  // The page-level route stream. The strip subscribes to it for activity and
+  // route frames; tests deliver frames through the captured instance.
+  const eventSources = [];
+  function FakeEventSource(url) {
+    this.url = url;
+    this.readyState = 0;
+    this.closed = false;
+    eventSources.push(this);
+  }
+  FakeEventSource.prototype.close = function () { this.readyState = 2; this.closed = true; };
 
   const sandbox = {
     window: {
@@ -73,8 +89,12 @@ function loadCritters() {
       removeEventListener() {}
     },
     console,
+    EventSource: FakeEventSource,
     fetch: async (path, init) => {
       session.fetchCalls.push({ path, method: init && init.method });
+      if (batchChildren && String(path).indexOf("subagent-role-router/batch?") !== -1) {
+        return { json: async () => ({ ok: true, value: { children: batchChildren } }) };
+      }
       return { json: async () => ({ ok: false, error: { code: "unmocked" } }) };
     },
     setTimeout: (fn, ms) => {
@@ -173,6 +193,22 @@ function loadCritters() {
     return entry.value;
   }
 
+  const statusHookEntries = [];
+  function useSessionStatus(selector) {
+    const at = session.statusCursor++;
+    let entry = statusHookEntries[at];
+    if (!entry) {
+      entry = { selector, value: selector(statusSnapshot), seeded: true };
+      statusHookEntries[at] = entry;
+    } else {
+      entry.selector = selector;
+      // A real selector hook recomputes during render against the current
+      // store; the narrow selector must keep its identity for an equal key.
+      entry.value = selector(statusSnapshot);
+    }
+    return entry.value;
+  }
+
   const slotRegistrations = [];
   const slotComponents = [];
   const ctx = {
@@ -222,11 +258,16 @@ function loadCritters() {
   const registration = slotRegistrations[at];
   const component = slotComponents[at];
   const injected = registration.inject("session-parent");
-  const props = Object.assign({}, injected, { useSessions });
+  // The standard `useSessionStatus` is a global scope prop; a host that only
+  // hands the injected `ctx.uiSession.sessionStatus` observable renders it as
+  // `useSessionStatusRoot`. Either spelling must reach the same logic.
+  const props = Object.assign({}, injected, { useSessions },
+    opts && opts.statusAsRoot ? { useSessionStatusRoot: useSessionStatus } : { useSessionStatus });
 
   function draw() {
     session.cursor = 0;
     session.hookCursor = 0;
+    session.statusCursor = 0;
     session.effects = [];
     session.renders += 1;
     const tree = component(props);
@@ -294,6 +335,37 @@ function loadCritters() {
       for (const interval of session.intervals.slice()) interval.fn();
       act();
       return harness.tree;
+    },
+    /** Publish a host Session-status map exactly like `ui-session` does. */
+    publishStatus(next) {
+      statusSnapshot = next;
+      let changed = false;
+      for (const entry of statusHookEntries) {
+        const value = entry.selector(statusSnapshot);
+        if (!Object.is(value, entry.value)) {
+          entry.value = value;
+          changed = true;
+        }
+      }
+      if (changed) {
+        session.dirty = true;
+        act();
+      }
+      return harness.tree;
+    },
+    /** Deliver one page-level route-stream frame. */
+    emitSse(event) {
+      const es = eventSources[eventSources.length - 1];
+      if (!es || typeof es.onmessage !== "function") throw new Error("no critter route stream");
+      es.onmessage({ data: JSON.stringify(event) });
+    },
+    /** Run the pending timer with this delay. */
+    fireTimer(ms) {
+      const at = session.timers.findIndex((timer) => timer.ms === ms);
+      if (at === -1) throw new Error("no timer with ms=" + ms);
+      const timer = session.timers[at];
+      session.timers.splice(at, 1);
+      timer.fn();
     },
     unmount() {
       for (const slot of session.slots) {
@@ -487,7 +559,45 @@ test("5. the open panel refreshes numbers from one 1s ticker only", () => {
   h.unmount();
 });
 
-test("6. a stale metric map cannot resurrect a child that already left", () => {
+test("6. real Session status outranks the scoped row, in both directions", () => {
+  const h = loadCritters();
+  // An addressable child whose list row still says running: false but whose
+  // host status says true must have a critter.
+  h.publish({ a: child(PARENT, { running: false }) });
+  h.publishStatus(new Map([["a", { running: true }]]));
+  h.render();
+  assert.equal(stationsOf(h.tree).length, 1, "status true must draw the child the row calls idle");
+
+  // The converse is the idle/history ghost: status says stopped while the row
+  // still says running. Nothing may remain in the header.
+  h.publishStatus(new Map([["a", { running: false }]]));
+  h.act();
+  assert.equal(rootOf(h.tree), null, "a status-stopped child must leave at once");
+  h.unmount();
+});
+
+test("7. rows riding the exit animation are not counted as running", () => {
+  const h = loadCritters();
+  h.publish({ a: child(PARENT, { displayTitle: "alpha" }), b: child(PARENT, { displayTitle: "beta" }) });
+  h.render();
+  openPanelByHover(h);
+  h.act();
+  assert.match(textsOf(h.tree).join(" "), /正在运行 2 个子代理/);
+
+  // b has left; its art may still play the leaving stretch until the timer
+  // fires, but the header and the panel already report one running child.
+  h.publish({ a: child(PARENT, { displayTitle: "alpha" }) });
+  h.act();
+  const root = rootOf(h.tree);
+  assert.ok(root, "the live child keeps the strip");
+  assert.equal(root.props["data-count"], 1, "the header data-count counts live rows only");
+  assert.match(root.props.title, /正在运行 1 个子代理/, "the header title counts live rows only");
+  assert.match(textsOf(h.tree).join(" "), /正在运行 1 个子代理/, "the panel title counts live rows only");
+  assert.equal(stationsOf(h.tree).length >= 1, true);
+  h.unmount();
+});
+
+test("8. a stale metric map cannot resurrect a child that already left", () => {
   const h = loadCritters();
   h.publish({ a: child(PARENT), b: child(PARENT) });
   h.render();
@@ -503,5 +613,74 @@ test("6. a stale metric map cannot resurrect a child that already left", () => {
   assert.ok(before >= 2);
   const rows = textsOf(h.tree).join(" ");
   assert.doesNotMatch(rows, /正在运行 2 个子代理/);
+  h.unmount();
+});
+
+test("9. the root sessionStatus observable works as the fallback hook", () => {
+  const h = loadCritters({ statusAsRoot: true });
+  h.publish({ a: child(PARENT, { running: false, displayTitle: "addressable" }) });
+  h.publishStatus(new Map([["a", { running: true }]]));
+  h.render();
+  assert.equal(stationsOf(h.tree).length, 1, "useSessionStatusRoot must be consulted like the standard prop");
+  h.unmount();
+});
+
+test("10. a route SSE frame refreshes the activity seed and the batch leg", async () => {
+  const h = loadCritters();
+  h.publish({ a: child(PARENT, { displayTitle: "worker", provider: "p1", model: "m1" }) });
+  h.render();
+  const calls = (needle) => h.session.fetchCalls.filter((call) => String(call.path).indexOf(needle) !== -1).length;
+  assert.equal(calls("subagent-role-router/activity?"), 1, "mount seeded once");
+  assert.equal(calls("subagent-role-router/batch?"), 1, "mount fetched the batch once");
+
+  h.emitSse({ type: "route", childId: "a" });
+  assert.equal(calls("subagent-role-router/activity?"), 2, "a route frame refreshes the seed immediately");
+  h.fireTimer(h.client.critterBatchRefreshMs);
+  await flush();
+  h.act();
+  assert.equal(calls("subagent-role-router/batch?"), 2, "the route frame also refreshes the batch leg");
+  h.unmount();
+});
+
+test("11. an unrelated status flush does not execute the closed header", () => {
+  const h = loadCritters();
+  h.publish({ a: child(PARENT) });
+  h.render();
+  const baseline = h.renders;
+  h.publishStatus(new Map([["session-elsewhere", { running: true }]]));
+  assert.equal(h.renders, baseline, "only the anchor family's status is subscribed");
+
+  h.publishStatus(new Map([["a", { running: false }]]));
+  assert.ok(h.renders > baseline, "this child's flip still re-renders");
+  h.unmount();
+});
+
+test("12. a model change on a live child re-renders the critter tag", () => {
+  const h = loadCritters();
+  h.publish({ a: child(PARENT, { displayTitle: "worker", provider: "p1", model: "m1" }) });
+  h.render();
+  const baseline = h.renders;
+  h.publish({ a: child(PARENT, { displayTitle: "worker", provider: "p1", model: "m2" }) });
+  assert.ok(h.renders > baseline, "the membership key carries the route pair");
+  const tag = stationsOf(h.tree)[0].children[1];
+  assert.equal(tag.props.className, "dsm-critters-tag");
+  assert.equal(tag.children[0], "m2");
+  h.unmount();
+});
+
+test("13. the batch endpoint's verified pair outranks the store row", async () => {
+  const h = loadCritters({
+    batchChildren: [{ childId: "a", live: true, activity: "running", label: "worker", provider: "p-batch", model: "m-batch" }]
+  });
+  // The store row claims an older pair; the batch read is the route controller's
+  // current answer and must paint instead.
+  h.publish({ a: child(PARENT, { displayTitle: "worker", provider: "p-store", model: "m-store" }) });
+  h.render();
+  await flush();
+  h.act();
+  await flush();
+  h.act();
+  const tag = stationsOf(h.tree)[0].children[1];
+  assert.equal(tag.children[0], "m-batch", "the server-verified batch pair wins");
   h.unmount();
 });

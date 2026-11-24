@@ -107,22 +107,47 @@ function harness(settings = config) {
     return run(0);
   }
 
-  /** Register a live child the way the host would. */
+  /**
+   * Register a live child the way the host would.
+   *
+   * The recovery contract needs `status` + `cancel` + `followup` on every case:
+   * a switch is `model.select` then a synchronous hook-cancel and followup, and
+   * the waterfall then returns `undefined` (never `{kind:'retry'}`). Extra
+   * functions are recorded even when a test expects no switch, so "the exempt
+   * child was left alone" can be asserted directly.
+   */
   function liveChild(id, { label = id, route = { provider: 'p', model: 'a' }, select = false } = {}) {
+    const state = { ...route };
+    const cancels = [];
+    const followups = [];
     const agent = {
       id,
+      status: 'running',
+      cancels,
+      followups,
       session: {
         header: { origin: 'subagent', label },
-        requestContext: () => route,
+        requestContext: () => ({ ...state }),
         snapshotEvents: () => []
       },
+      cancel(cause, options) { cancels.push({ cause, options }); },
+      followup(message) { followups.push(message); },
       options: { provider: 'parent', model: 'parent' }
     };
     if (select) {
       // The host's front door (`model.select`), recorded so tests can assert
-      // exactly which selection was pushed onto the child.
+      // exactly which selection was pushed onto the child. Selecting also moves
+      // the served route, so the NEXT failure is attributed to the new route.
       const selects = [];
-      agent.model = { selects, select(selection) { selects.push({ ...selection }); } };
+      agent.model = {
+        selects,
+        current: () => ({ ...state }),
+        select(selection) {
+          selects.push({ ...selection });
+          state.provider = selection.provider;
+          state.model = selection.model;
+        }
+      };
     }
     agents.set(id, agent);
     return agent;
@@ -206,21 +231,29 @@ test('an exempt child never enters the automatic failover', async () => {
   const exemptChild = h.liveChild('exempt-1', { label: 'egm-goldfish-logic' });
   const plainChild = h.liveChild('plain-1', { label: 'researcher', select: true });
   const failure = { code: 'RATE_LIMIT', message: 'boom' };
-  // The exempt child's failure is passed through untouched — no retry verdict.
+  // The exempt child's failure is passed through untouched: no selection, no
+  // cut, no resume, and the waterfall's own value survives.
   const out = await h.error(exemptChild, failure, 'passthrough');
   assert.equal(out, 'passthrough');
+  assert.equal(exemptChild.cancels.length, 0);
+  assert.equal(exemptChild.followups.length, 0);
   // ...and its failure leaves no pending switch: the rebuilt request is the seed.
   const seed = { provider: 'p', model: 'a', reasoningEffort: 'high', maxTokens: 5 };
   const untouched = await h.request(exemptChild, seed);
   assert.equal(untouched, seed);
-  // The plain child still fails over: error asks for a retry, and the target
-  // for the NEXT step is selected through the front door the moment the
-  // failure is seen — the pool's second entry, without the failed route's
-  // inherited strength. The rebuilt request itself is never rewritten (the
-  // host freezes the selection and throws on a differing proposal).
+  // The plain child still fails over, but the contract is a CUT + RESUME, not
+  // `{kind:'retry'}` (a retry re-runs the same frozen selection): the pool's
+  // second entry is selected through the front door, the in-flight attempt is
+  // cancelled with `keepInbox`, and the same task is queued as a continuation
+  // in one synchronous window. The rebuilt request itself is never rewritten.
   const verdict = await h.error(plainChild, failure, undefined);
-  assert.deepEqual(verdict, { kind: 'retry' });
+  assert.equal(verdict, undefined, 'a switch never asks the host to retry the same route');
   assert.deepEqual(plainChild.model.selects, [{ provider: 'q', model: 'b' }]);
+  assert.equal(plainChild.cancels.length, 1);
+  assert.deepEqual(plainChild.cancels[0], { cause: { kind: 'hook', reason: 'error-switch' }, options: { keepInbox: true } });
+  assert.equal(plainChild.followups.length, 1, 'the cut attempt is resumed on the new route');
+  assert.equal(plainChild.followups[0].source.form, 'failover-continuation');
+  assert.match(plainChild.followups[0].content.map((part) => part.text).join(''), /q\/b/);
   const switched = await h.request(plainChild, seed);
   assert.equal(switched, seed);
   assert.equal(plainChild.model.selects.length, 2, 'the target is re-picked while the seed lags');

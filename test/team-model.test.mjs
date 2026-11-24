@@ -89,6 +89,21 @@ function harness(settings = config) {
     },
     get(key) {
       if (key === 'agents') return { get: (id) => agents.get(id) };
+      // The write endpoints verify membership against this parent-scoped catalog.
+      if (key === 'subagents') {
+        return {
+          async listDescendants(root) {
+            const forms = [root, root.startsWith('session-') ? root.slice(8) : 'session-' + root];
+            const rows = [];
+            for (const agent of agents.values()) {
+              const header = agent.session?.header ?? {};
+              if (header.origin !== 'subagent' || !forms.includes(header.parentSession)) continue;
+              rows.push({ id: agent.id, mode: 'continuable', label: header.label ?? agent.id, parentId: header.parentSession, depth: 1 });
+            }
+            return rows;
+          }
+        };
+      }
       return undefined;
     }
   };
@@ -139,7 +154,7 @@ function harness(settings = config) {
     const agent = {
       id,
       session: {
-        header: { origin: 'subagent', label },
+        header: { origin: 'subagent', label, parentSession: 'parent-1' },
         requestContext: () => route,
         snapshotEvents: () => []
       },

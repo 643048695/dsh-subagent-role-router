@@ -132,7 +132,7 @@ test('a reserved route leaves the general whitelist but reaches the host gate', 
   assert.ok(gate.includes('magpie/group/dnq'));
 });
 
-test('a reserved route is dropped even when a role pool also names it', () => {
+test('an explicit role-pool entry remains usable even when another role names it', () => {
   const live = section({
     patchModels: [
       { provider: 'magpie', model: 'ui-model-a' },
@@ -140,13 +140,13 @@ test('a reserved route is dropped even when a role pool also names it', () => {
     ]
   });
   const pooled = resolveRolePool(live, 'patch').map((route) => route.model);
-  assert.deepEqual(pooled, ['group/dnq'], 'the reservation wins over the role pool');
+  assert.deepEqual(pooled, ['ui-model-a', 'group/dnq'], 'explicit pool membership must not be silently revoked by another list');
 });
 
-test('the old single-model role form is filtered too', () => {
+test('the old single-model role form remains an explicit usable route', () => {
   const live = section({ exploreModel: 'ui-model-b' });
   const pooled = resolveRolePool(live, 'explore').map((route) => route.model);
-  assert.deepEqual(pooled, [], 'a legacy single route that is reserved is not handed out');
+  assert.deepEqual(pooled, ['ui-model-b'], 'legacy role configuration remains effective even when the model appears in a coordinator list');
 });
 
 test('isCoordinatorRoute answers exactly for the two lists', () => {

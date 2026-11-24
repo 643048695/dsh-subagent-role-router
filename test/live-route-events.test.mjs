@@ -69,6 +69,22 @@ function harness(settings = config) {
     },
     get(key) {
       if (key === 'agents') return { get: (id) => agents.get(id) };
+      // Membership authority for the write endpoints: the parent's own host
+      // catalog. A live id alone is no longer enough to justify a write.
+      if (key === 'subagents') {
+        return {
+          async listDescendants(root) {
+            const forms = [root, root.startsWith('session-') ? root.slice(8) : 'session-' + root];
+            const rows = [];
+            for (const agent of agents.values()) {
+              const header = agent.session?.header ?? {};
+              if (header.origin !== 'subagent' || !forms.includes(header.parentSession)) continue;
+              rows.push({ id: agent.id, mode: 'continuable', label: header.label ?? agent.id, parentId: header.parentSession, depth: 1 });
+            }
+            return rows;
+          }
+        };
+      }
       return undefined;
     }
   };
@@ -146,22 +162,46 @@ function harness(settings = config) {
     return { req, res, close() { for (const fn of closeHandlers.splice(0)) fn(); } };
   }
 
+  /**
+   * Register a live child the way the host would.
+   *
+   * Recovery fixtures need `status` + `cancel` + `followup` even when a test
+   * expects no switch: `switchNow` preflights all three, and a test proving "no
+   * cut happened" must be able to read the recorded calls. A selection also
+   * moves the served route, exactly like the host's next committed request.
+   */
   function liveChild(id, route = { provider: 'p', model: 'a' }, opts = {}) {
+    const state = { ...route };
+    const cancels = [];
+    const followups = [];
     const agent = {
       id,
+      status: 'running',
+      cancels,
+      followups,
       session: {
-        header: { origin: 'subagent', label: id },
-        requestContext: () => ({ provider: route.provider, model: route.model, contextWindow: 1000 }),
-        requestHeader: () => ({ config: { ...route } }),
+        header: { origin: 'subagent', label: id, parentSession: 'parent-1' },
+        requestContext: () => ({ provider: state.provider, model: state.model, contextWindow: 1000 }),
+        requestHeader: () => ({ config: { ...state } }),
         snapshotEvents: () => []
       },
+      cancel(cause, options) { cancels.push({ cause, options }); },
+      followup(message) { followups.push(message); },
       options: { provider: 'parent', model: 'parent' }
     };
     if (opts.withModelSelect) {
       // The host's front door (`model.select`); disk stubs and older hosts do
       // not have one. Recorded so tests can assert the exact pushes.
       const selects = [];
-      agent.model = { selects, select(selection) { selects.push({ ...selection }); } };
+      agent.model = {
+        selects,
+        current: () => ({ ...state }),
+        select(selection) {
+          selects.push({ ...selection });
+          state.provider = selection.provider;
+          state.model = selection.model;
+        }
+      };
     }
     agents.set(id, agent);
     return agent;
@@ -279,18 +319,25 @@ test('a failover switch with no override announces itself exactly once', async (
   const child = h.liveChild('child-4', { provider: 'p', model: 'a' }, { withModelSelect: true });
   const stream = await h.openEvents();
 
-  // A timeout moves the failover cursor to the next pool entry (q/b) and
-  // pushes it through the front door at once, so the NEXT step uses it.
-  await h.error(child, { code: 'TIMEOUT', message: 'slow' }, { kind: 'continue' });
+  // A timeout moves the failover cursor to the next pool entry (q/b). The
+  // contract is a synchronous select + hook-cancel + followup; the waterfall
+  // returns `undefined` (a retry would re-run the SAME frozen selection).
+  const outcome = await h.error(child, { code: 'TIMEOUT', message: 'slow' }, { kind: 'continue' });
+  assert.equal(outcome, undefined);
   assert.deepEqual(child.model.selects, [{ provider: 'q', model: 'b' }]);
+  assert.equal(child.cancels.length, 1);
+  assert.deepEqual(child.cancels[0], { cause: { kind: 'hook', reason: 'error-switch' }, options: { keepInbox: true } });
+  assert.equal(child.followups.length, 1, 'the cut attempt is resumed on the new route');
+  assert.equal(child.followups[0].source.form, 'failover-continuation');
 
   // The request the child is already running is never rewritten (the host
-  // freezes the selection): it comes back as-is, but the switch to the
-  // failover target is announced even before the seed catches up.
+  // freezes the selection): it comes back as-is, the target is re-picked while
+  // the seed lags, and the switch is announced before the seed catches up.
   const before = stream.res.writes.length;
   const seeded = { provider: 'p', model: 'a' };
   const switched = await h.request(childPayload(child), seeded);
   assert.deepEqual(switched, seeded);
+  assert.equal(child.model.selects.length, 2, 'the request-time re-pick reaches the new route');
 
   const announce = frames(stream.res.writes.slice(before)).filter((f) => f.type === 'route');
   assert.equal(announce.length, 1);

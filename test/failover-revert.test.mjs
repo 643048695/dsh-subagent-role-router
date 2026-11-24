@@ -81,6 +81,21 @@ function harness(settings = config) {
     },
     get(key) {
       if (key === 'agents') return { get: (id) => agents.get(id) };
+      // The write endpoints verify membership against the host's parent catalog.
+      if (key === 'subagents') {
+        return {
+          async listDescendants(root) {
+            const forms = [root, root.startsWith('session-') ? root.slice(8) : 'session-' + root];
+            const rows = [];
+            for (const agent of agents.values()) {
+              const header = agent.session?.header ?? {};
+              if (header.origin !== 'subagent' || !forms.includes(header.parentSession)) continue;
+              rows.push({ id: agent.id, mode: 'continuable', label: header.label ?? agent.id, parentId: header.parentSession, depth: 1 });
+            }
+            return rows;
+          }
+        };
+      }
       return undefined;
     }
   };
@@ -156,6 +171,8 @@ function harness(settings = config) {
 
   function liveChild(id, route = { provider: 'p', model: 'general' }) {
     const selects = [];
+    const cancels = [];
+    const followups = [];
     // The host serves whatever was selected last, so the fake must move too:
     // `requestContext()` is the plugin's only evidence of which route actually
     // failed, and a fixture that froze it would hide a real bug (it nearly did:
@@ -163,8 +180,10 @@ function harness(settings = config) {
     const served = { provider: route.provider, model: route.model };
     const agent = {
       id,
+      status: 'running',
       session: {
-        header: { origin: 'subagent', label: id },
+        id,
+        header: { origin: 'subagent', label: id, parentSession: 'parent-1' },
         requestContext: () => ({ provider: served.provider, model: served.model, contextWindow: 1000 }),
         requestHeader: () => ({ config: { ...served } }),
         snapshotEvents: () => []
@@ -177,13 +196,23 @@ function harness(settings = config) {
           if (typeof selection.model === 'string') served.model = selection.model;
         }
       },
+      cancel(cause, options) { cancels.push({ cause, options }); },
+      followup(message) { followups.push(message); },
+      cancels,
+      followups,
       options: { provider: 'parent', model: 'parent' }
     };
     agents.set(id, agent);
     return agent;
   }
 
-  return { agents, routes, warnings, error, request, call, openEvents, liveChild, dispose() { for (const fn of cleanups.reverse()) fn(); } };
+  /** Emit one durable session event to the plugin's recovery observer. */
+  function emitSession(session, event) {
+    const payload = { session, event };
+    for (const fn of listeners.get('session/event') ?? []) fn(payload.session, payload.event);
+  }
+
+  return { agents, routes, warnings, error, request, call, openEvents, liveChild, emitSession, dispose() { for (const fn of cleanups.reverse()) fn(); } };
 }
 
 test('every failure switches except a cancellation', () => {
@@ -202,8 +231,20 @@ test('a generic 400 on an ordinary subagent moves it to the next candidate', asy
   const h = harness();
   const child = h.liveChild('child-1', { provider: 'p', model: 'a' });
   const outcome = await h.error(child, { code: 'INVALID_REQUEST', message: 'The request could not be completed.' }, undefined);
-  assert.deepEqual(outcome, { kind: 'retry' });
+  // NEVER `{kind:'retry'}`: the host reuses the step's frozen selection on a
+  // retry, so retry would re-burn the same route. The hook cuts and resumes.
+  assert.equal(outcome, undefined);
   assert.deepEqual(child.model.selects, [{ provider: 'q', model: 'b' }]);
+  // The frozen attempt was cut with a hook cause and the inbox kept; then the
+  // continuation was queued in the SAME synchronous window.
+  assert.equal(child.cancels.length, 1);
+  assert.deepEqual(child.cancels[0].cause, { kind: 'hook', reason: 'error-switch' });
+  assert.deepEqual(child.cancels[0].options, { keepInbox: true });
+  assert.equal(child.followups.length, 1, 'the child must be resumed, not left idle');
+  const text = child.followups[0].content.map((part) => part.text).join('');
+  assert.match(text, /继续/);
+  assert.match(text, /q\/b/, 'the continuation names the route it moved to');
+  assert.doesNotMatch(text, /retry/i);
   h.dispose();
 });
 
@@ -214,6 +255,8 @@ test('a cancelled run never resurrects work on another model', async () => {
   const outcome = await h.error(child, { code: 'ABORTED' }, sentinel);
   assert.equal(outcome, sentinel);
   assert.deepEqual(child.model.selects, []);
+  assert.deepEqual(child.cancels, [], 'a cancelled run must not be re-cut to resume it');
+  assert.deepEqual(child.followups, []);
   h.dispose();
 });
 
@@ -229,8 +272,11 @@ test('a manually picked route that fails is withdrawn, and the list head continu
   assert.equal(picked.body.ok, true);
 
   const outcome = await h.error(child, { code: 'INVALID_REQUEST', message: 'The request could not be completed.' }, undefined);
-  assert.deepEqual(outcome, { kind: 'retry' });
+  assert.equal(outcome, undefined);
   assert.deepEqual(child.model.selects, [{ provider: 'q', model: 'b' }, { provider: 'p', model: 'a' }]);
+  assert.equal(child.cancels.length, 1);
+  assert.equal(child.followups.length, 1);
+  assert.match(child.followups[0].content.map((part) => part.text).join(''), /撤回/);
 
   const after = await h.call({ path: '/subagent-role-router/route?childId=child-1', method: 'GET' });
   assert.ok(!after.body.value.override, 'the dead pick must be withdrawn');
@@ -250,7 +296,7 @@ test('a coordinator child reverts to its group head, never to the general list',
   assert.equal(picked.body.ok, true);
 
   const outcome = await h.error(child, { code: 'INVALID_REQUEST', message: 'Open Design: [code=upstream_error] The request could not be completed.' }, undefined);
-  assert.deepEqual(outcome, { kind: 'retry' });
+  assert.equal(outcome, undefined);
   assert.deepEqual(child.model.selects.at(-1), { provider: 'magpie-responses', model: 'codex/gpt-6.2-sol' });
   const after = await h.call({ path: '/subagent-role-router/route?childId=child-1', method: 'GET' });
   assert.ok(!after.body.value.override, 'the dead pick must be withdrawn');
@@ -268,6 +314,9 @@ test('the switch is announced on the SSE stream the header listens to', async ()
   const failover = events.frames().filter((frame) => frame.type === 'failover');
   assert.equal(failover.length, 1, 'exactly one announcement per switch');
   assert.equal(failover[0].childId, 'child-1');
+  // The host writes `parentSession` on the child header; the older spellings
+  // are only fallbacks. A pill with no parent would leak into every page.
+  assert.equal(failover[0].parentSessionId, 'parent-1');
   assert.deepEqual(failover[0].from, { provider: 'q', model: 'b', reasoningEffort: '' });
   assert.deepEqual(failover[0].to, { provider: 'p', model: 'a', reasoningEffort: '' });
   assert.equal(failover[0].manual, true, 'the UI words a withdrawn pick differently');
@@ -280,9 +329,31 @@ test('after every candidate has failed the real error surfaces', async () => {
   const h = harness();
   const child = h.liveChild('child-1', { provider: 'p', model: 'a' });
   const first = await h.error(child, { code: 'INVALID_REQUEST', message: 'bad' }, undefined);
-  assert.deepEqual(first, { kind: 'retry' });
+  assert.equal(first, undefined);
+  assert.equal(child.cancels.length, 1);
   const sentinel = { kind: 'surface' };
   const second = await h.error(child, { code: 'INVALID_REQUEST', message: 'bad again' }, sentinel);
   assert.equal(second, sentinel, 'two candidates, one switch, then the error');
+  assert.equal(child.cancels.length, 1, 'the exhausted episode must not cut again');
+  assert.equal(child.followups.length, 1, 'no continuation may be queued for a dead pool');
+  h.dispose();
+});
+
+test('a committed assistant message re-opens the switch budget', async () => {
+  const h = harness();
+  const child = h.liveChild('child-1', { provider: 'p', model: 'a' });
+  const first = await h.error(child, { code: 'INVALID_REQUEST', message: 'bad' }, undefined);
+  assert.equal(first, undefined);
+  assert.deepEqual(child.model.selects, [{ provider: 'q', model: 'b' }]);
+  // The route B really answered: this is the ONLY success signal.
+  h.emitSession(child.session, {
+    type: 'assistant/message',
+    data: { turn: 1, step: 3, message: { source: { provider: 'q', model: 'b' } } }
+  });
+  // A later failure on B may switch again — the old per-run counter never reset.
+  const second = await h.error(child, { code: 'INVALID_REQUEST', message: 'bad again' }, undefined);
+  assert.equal(second, undefined);
+  assert.deepEqual(child.model.selects.at(-1), { provider: 'p', model: 'a' });
+  assert.equal(child.cancels.length, 2);
   h.dispose();
 });

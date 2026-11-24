@@ -91,8 +91,10 @@ function harness(settings = config) {
     const served = { provider: route.provider, model: route.model };
     const agent = {
       id,
+      status: 'running',
       session: {
-        header: { origin: 'subagent', label: id },
+        id,
+        header: { origin: 'subagent', label: id, parentSession: 'parent-1' },
         requestContext: () => ({ provider: served.provider, model: served.model, contextWindow: 1000 }),
         requestHeader: () => ({ config: { ...served } }),
         snapshotEvents: () => []
@@ -113,6 +115,12 @@ function harness(settings = config) {
     };
     agents.set(id, agent);
     return agent;
+  }
+
+  /** Emit one durable session event to the plugin's recovery observer. */
+  function emitSession(session, event) {
+    const payload = { session, event };
+    for (const fn of listeners.get('session/event') ?? []) fn(payload.session, payload.event);
   }
 
   /** Open the plugin's SSE stream and collect every frame. */
@@ -142,7 +150,7 @@ function harness(settings = config) {
     };
   }
 
-  return { warnings, emit, stream, liveChild, openEvents, dispose() { for (const fn of cleanups.reverse()) fn(); } };
+  return { warnings, emit, stream, liveChild, emitSession, openEvents, dispose() { for (const fn of cleanups.reverse()) fn(); } };
 }
 
 test('3 minutes of silence cuts the attempt and moves to the next model', async (t) => {
@@ -211,7 +219,33 @@ test('the stalled route is never reselected for the retry', async (t) => {
   h.dispose();
 });
 
-test('two stalls, then the watchdog stands down', async (t) => {
+test('a stalled route is never retried in the same episode, so the second stall stands down', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness();
+  const child = h.liveChild('child-1', { provider: 'p', model: 'a' });
+
+  // A stalls: B is the only untried candidate, so the watchdog cuts once.
+  h.stream(child, 'start');
+  t.mock.timers.tick(180_000);
+  assert.equal(child.cancels.length, 1);
+  assert.deepEqual(child.model.selects, [{ provider: 'q', model: 'b' }]);
+
+  // B stalls too. Both routes have now actually failed in this episode, so
+  // there is nothing left to try: cutting back to A would re-run a route that
+  // already hung. The watchdog stands down.
+  h.stream(child, 'start');
+  t.mock.timers.tick(180_000);
+  assert.equal(child.cancels.length, 1, 'no second cut: the episode is bounded by actual failed routes');
+  assert.equal(child.followups.length, 1);
+  assert.ok(h.warnings.some((line) => line.includes('standing down')));
+
+  h.stream(child, 'start');
+  t.mock.timers.tick(600_000);
+  assert.equal(child.cancels.length, 1, 'a later stall in the same episode cannot cut again');
+  h.dispose();
+});
+
+test('only a real assistant message resets the stall episode', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const h = harness();
   const child = h.liveChild('child-1', { provider: 'p', model: 'a' });
@@ -219,15 +253,55 @@ test('two stalls, then the watchdog stands down', async (t) => {
   h.stream(child, 'start');
   t.mock.timers.tick(180_000);
   assert.equal(child.cancels.length, 1);
+  assert.deepEqual(child.model.selects, [{ provider: 'q', model: 'b' }]);
 
+  // A streamed chunk is not success: it only cancels the current timer.
+  h.stream(child, 'start');
+  h.stream(child, 'chunk');
+  t.mock.timers.tick(600_000);
+  assert.equal(child.cancels.length, 1, 'a chunk must not clear the episode');
+
+  // B really answered — the route works, so a later stall may try A again.
+  h.emitSession(child.session, {
+    type: 'assistant/message',
+    data: { turn: 1, step: 2, message: { source: { provider: 'q', model: 'b' } } }
+  });
   h.stream(child, 'start');
   t.mock.timers.tick(180_000);
-  assert.equal(child.cancels.length, 2);
+  assert.equal(child.cancels.length, 2, 'a committed assistant message re-opens the episode');
+  assert.deepEqual(child.model.selects.at(-1), { provider: 'p', model: 'a' });
+  h.dispose();
+});
+
+test('a user stop before the timer fires is never resurrected', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness();
+  const child = h.liveChild('child-1', { provider: 'p', model: 'a' });
 
   h.stream(child, 'start');
+  // The parent/user cancelled the child; the generation latches dead before
+  // the watchdog timer fires.
+  h.emitSession(child.session, {
+    type: 'turn/end',
+    data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } }
+  });
   t.mock.timers.tick(600_000);
-  assert.equal(child.cancels.length, 2, 'the third stall stands down instead of cutting again');
-  assert.ok(h.warnings.some((line) => line.includes('standing down')));
+  assert.deepEqual(child.model.selects, []);
+  assert.deepEqual(child.cancels, [], 'a stopped child must not be cut and resumed');
+  assert.deepEqual(child.followups, []);
+  h.dispose();
+});
+
+test('a disposed child leaves no timer and cannot be resurrected', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness();
+  const child = h.liveChild('child-1', { provider: 'p', model: 'a' });
+
+  h.stream(child, 'start');
+  h.emit('agent/disposed', { agent: child });
+  t.mock.timers.tick(600_000);
+  assert.deepEqual(child.cancels, []);
+  assert.deepEqual(child.followups, []);
   h.dispose();
 });
 
