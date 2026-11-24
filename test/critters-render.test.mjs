@@ -629,6 +629,10 @@ test("10. a route SSE frame refreshes the activity seed and the batch leg", asyn
   const h = loadCritters();
   h.publish({ a: child(PARENT, { displayTitle: "worker", provider: "p1", model: "m1" }) });
   h.render();
+  // Let the mount reads finish: a new SSE frame that arrives while the SAME
+  // URL is still on the wire joins that read instead of spending a second GET.
+  await flush();
+  h.act();
   const calls = (needle) => h.session.fetchCalls.filter((call) => String(call.path).indexOf(needle) !== -1).length;
   assert.equal(calls("subagent-role-router/activity?"), 1, "mount seeded once");
   assert.equal(calls("subagent-role-router/batch?"), 1, "mount fetched the batch once");

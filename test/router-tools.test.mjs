@@ -298,6 +298,32 @@ test("all_current expands to writable children only, at call time", async () => 
 	assert.deepEqual(s.childRoutes.get("child-1"), { provider: "q", model: "b" });
 });
 
+test("a multi-target update shares one raw catalog read", async () => {
+  const rows = Array.from({ length: 20 }, (_, index) => ({ id: `child-${index}`, mode: "continuable", label: `worker-${index}` }));
+  const agents = new Map(rows.map((row) => [row.id, makeChildAgent(row.id)]));
+  const host = makeHost({ rows, agents });
+  const originalGet = host.ctx.get;
+  const catalogCalls = [];
+  host.ctx.get = (name) => {
+    if (name !== "subagents") return originalGet(name);
+    const service = originalGet("subagents");
+    return {
+      listChildren: async (parent) => {
+        catalogCalls.push(parent);
+        return service.listChildren(parent);
+      }
+    };
+  };
+  const { byName, s } = await install({ host });
+  const value = await byName.subagent_routes_update.execute(
+    { action: "select", targets: { child_ids: rows.map((row) => row.id) }, provider: "q", model: "b" },
+    { agent: { session: { header: { id: PARENT } } } }
+  );
+  assert.equal(value.summary.ok, 20);
+  assert.deepEqual(catalogCalls, [PARENT], "the controller's batch scope covers every tool target");
+  assert.deepEqual(s.childRoutes.get("child-0"), { provider: "q", model: "b" });
+});
+
 test("member_names without the adapter fail with an honest teams-unavailable error", async () => {
 	const { byName } = await install({
 		host: makeHost({ rows: standardRows(), agents: standardAgents() })

@@ -615,8 +615,8 @@ test("8. presence follows the store signature instead of a timer", async () => {
   assert.equal(driver.timers.length, 0, "still no timers after focus");
 });
 
-test("9. the probe coalesces focus bursts, arms no timers, and never wakes another conversation", async () => {
-  // (a) A focus burst shares the in-flight verify, and no timer chain exists at all.
+test("9. the probe coalesces focus bursts, bounds the read without polling, and never wakes another conversation", async () => {
+  // (a) Focus shares the in-flight verify. One deadline bounds it; no polling chain exists.
   let gets = 0;
   let releaseFirst;
   const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
@@ -638,7 +638,7 @@ test("9. the probe coalesces focus bursts, arms no timers, and never wakes anoth
 
   await driver.render({ sessionId: PARENT, sessionsList });
   assert.equal(gets, 1, "mount starts exactly one verify");
-  assert.equal(driver.timers.length, 0, "no timer is armed while a verify is in flight — or ever");
+  assert.equal(driver.timers.length, 1, "one deadline bounds the in-flight verify without recurring polling");
 
   driver.triggerFocus();
   driver.triggerFocus();

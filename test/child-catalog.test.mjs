@@ -141,19 +141,50 @@ test('an exposing old method wins over the newer legs', async () => {
   h.dispose();
 });
 
-test('the renamed API is asked before the projection', async () => {
+test('the parent projection is read BEFORE the recursive walk, and released once', async () => {
+  const order = [];
+  const service = {
+    async listDescendants() { order.push('descendants'); return [descendant('deep', 'session-parent')]; }
+  };
+  let disposeCalls = 0;
+  let symbolCalls = 0;
+  const query = {
+    async observeSession() {
+      order.push('query');
+      return {
+        projections: { values: { subagentCatalog: [catalogEntry('direct')] } },
+        dispose() { disposeCalls += 1; throw new Error('release failed'); },
+        [Symbol.dispose]() { symbolCalls += 1; }
+      };
+    }
+  };
+  const h = harness({ service, query });
+  const result = await strictChildrenOf(h.ctx, h.state, 'session-parent');
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.value.map((row) => row.childId), ['direct']);
+  assert.deepEqual(order, ['query'], 'the recursive host walk is not entered when the parent projection can answer');
+  assert.equal(disposeCalls, 1, 'one release');
+  assert.equal(symbolCalls, 0, 'a host exposing both spellings must not be disposed twice');
+  h.dispose();
+});
+
+test('a projection that cannot answer falls through to the recursive walk', async () => {
   const order = [];
   const service = {
     async listDescendants() { order.push('descendants'); return [descendant('deep', 'session-parent')]; }
   };
   const query = {
-    async observeSession() { order.push('query'); return { projections: { values: { subagentCatalog: [catalogEntry('proj')] } } }; }
+    async observeSession() {
+      order.push('query');
+      return { projections: { values: {} } };
+    }
   };
   const h = harness({ service, query });
   const result = await strictChildrenOf(h.ctx, h.state, 'session-parent');
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, true, 'the recursive leg remains the last resort');
   assert.deepEqual(result.value.map((row) => row.childId), ['deep']);
-  assert.deepEqual(order, ['descendants'], 'the projection is the last resort, not the first');
+  assert.deepEqual([...new Set(order)], ['query', 'descendants'], 'the recursive leg remains the last resort');
+  assert.equal(order.at(-1), 'descendants');
   h.dispose();
 });
 

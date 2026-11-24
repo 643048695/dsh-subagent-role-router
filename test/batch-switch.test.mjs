@@ -366,6 +366,57 @@ test('the child list is the host catalog for THIS parent, and nothing else', asy
   h.dispose();
 });
 
+test('a 20-child batch reads the host catalog once for select and once for clear', async () => {
+  const children = Array.from({ length: 20 }, (_, i) => ({ id: `child-${i}`, mode: 'continuable' }));
+  const h = harness({
+    children,
+    live: children.map((entry) => [entry.id, { provider: 'p', model: 'a' }])
+  });
+
+  h.listCalls.length = 0;
+  const selected = await h.select('parent-1', children.map((entry) => ({ childId: entry.id, provider: 'q', model: 'b' })));
+  assert.equal(selected.body.value.summary.ok, 20);
+  assert.deepEqual(h.listCalls, ['parent-1'], '21 authorization checks share ONE host catalog read');
+
+  h.listCalls.length = 0;
+  const cleared = await h.clear('parent-1', children.map((entry) => entry.id));
+  assert.equal(cleared.body.value.summary.ok, 20);
+  assert.deepEqual(h.listCalls, ['parent-1'], 'clear is coalesced the same way');
+  h.dispose();
+});
+
+test('sharing the raw catalog never caches an item authorization', async () => {
+  const h = harness({
+    children: [
+      { id: 'worker', mode: 'continuable' },
+      { id: 'closing', mode: 'continuable' },
+      { id: 'reparented', mode: 'continuable' }
+    ],
+    live: [
+      ['worker', { provider: 'p', model: 'a' }],
+      ['closing', { provider: 'p', model: 'a' }],
+      ['reparented', { provider: 'p', model: 'a' }]
+    ]
+  });
+  // Establish a prior readable snapshot; none of its verdicts may leak forward.
+  const first = await h.batch('parent-1');
+  assert.equal(first.body.value.children.filter((row) => row.selectable).length, 3);
+
+  h.agent('closing').status = 'closing';
+  h.agent('reparented').session.header.parentSession = 'session-another-parent';
+  h.listCalls.length = 0;
+  const written = await h.select('parent-1', [
+    { childId: 'worker', provider: 'q', model: 'b' },
+    { childId: 'closing', provider: 'q', model: 'b' },
+    { childId: 'reparented', provider: 'q', model: 'b' },
+    { childId: 'forged', provider: 'q', model: 'b' }
+  ]);
+  assert.deepEqual(h.listCalls, ['parent-1'], 'still one catalog read for the whole batch');
+  assert.deepEqual(written.body.value.results.map((row) => row.error?.code ?? row.ok), [true, 'ending', 'not-owned', 'not-owned']);
+  assert.equal(h.agent('closing').model, undefined, 'a closing child is never written');
+  h.dispose();
+});
+
 test('a host without the catalog service refuses instead of guessing', async () => {
   const h = harness({ withoutCatalog: true });
   const read = await h.batch('parent-1');

@@ -117,11 +117,15 @@ The right end of the session header carries up to three pixel figures, one per *
 
 **Performance is a design constraint here, not a later fix**:
 
-1. The header subscribes only to a *string signature* of "which subagents of this parent are running". The host compares selector results by value (`useSyncExternalStoreWithSelector` → `Object.is`), so an unchanged signature means **no re-render** — another session streaming tokens or another subagent running never wakes this header.
-2. Elapsed time and tokens are computed **only while the panel is open**, by a single one-second ticker; closed, it costs nothing and no subscription callback runs.
+1. The header subscribes to a string signature of the current parent's members and models. The host compares selector results by value, so an unchanged signature does **not trigger a render through that subscription**. The selector can still run on host updates; this is not a claim of zero computation.
+2. Elapsed time and tokens are computed **only while the panel is open**, with a shared one-second ticker that is removed on close. Critter animations pause when the document is hidden.
 3. Character art is cached per (phase, role) as the same React element, so a re-render never rebuilds the figure.
 
-`test/critters-render.test.mjs` (6 cases) pins all three down: the member signature ignores tokens/duration/unrelated sessions, the component does not re-execute when tokens change, membership changes re-render and reuse the same `<svg>`, there is no timer while closed and exactly one while open, and a departed subagent is not resurrected by stale data.
+Tests cover signatures, repeated rendering, artwork reuse, panel timers and exit animations. Passing functional tests does not measure CPU or memory use on a particular machine.
+
+5.13.1 reduces background work further: direct-child discovery prefers the parent's existing catalog projection instead of traversing the whole descendant tree. A batch shares only its request-local raw membership read; each target is still checked against its live agent, ownership and writability. The client filters unrelated family events and coalesces identical in-flight reads per page; writes fence pre-write reads, while timeouts, unmount and the critter switch release abandoned requests. Birth-name suggestions are saved asynchronously in coalesced batches, rather than synchronously on every dispatch.
+
+Regression tests verify actual read, identity and save counts. Those reductions are not presented as measured system-wide or model-response speedups.
 
 ### Capability 7 — Batch model switch: rewrite every direct child at once
 
