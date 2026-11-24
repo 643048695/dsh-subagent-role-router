@@ -502,15 +502,19 @@ test("4. hover intent opens the panel; leave, Esc and unmount close or clean it"
 
 test("5. '+N' opens the panel and rows show real short titles", () => {
   const h = loadCritters();
-  h.publish({
-    a: child(PARENT, { displayTitle: "alpha task" }),
-    b: child(PARENT, { displayTitle: "beta task" }),
-    c: child(PARENT, { displayTitle: "gamma task" }),
-    d: child(PARENT, { displayTitle: "delta task" }),
-    e: child(PARENT, { displayTitle: "epsilon task" })
-  });
+  // Ten workers: the strip shows eight before the "+N" chip takes over, so a
+  // busy parent sees its fleet instead of three anonymous sprites.
+  const ten = {};
+  const titles = [];
+  for (let i = 0; i < 10; i += 1) {
+    const key = String.fromCharCode(97 + i);
+    const title = "task " + String.fromCharCode(97 + i);
+    titles.push(title);
+    ten[key] = child(PARENT, { displayTitle: title });
+  }
+  h.publish(ten);
   h.render();
-  assert.equal(stationsOf(h.tree).length, 3, "only the first three stations render");
+  assert.equal(stationsOf(h.tree).length, 8, "the strip shows eight stations before overflowing");
 
   const more = moreOf(h.tree);
   assert.ok(more, "the overflow chip exists");
@@ -519,8 +523,8 @@ test("5. '+N' opens the panel and rows show real short titles", () => {
   h.act();
 
   const joined = textsOf(h.tree).join(" | ");
-  assert.match(joined, /正在运行 5 个子代理/);
-  for (const label of ["alpha task", "beta task", "gamma task", "delta task", "epsilon task"]) {
+  assert.match(joined, /正在运行 10 个子代理/);
+  for (const label of titles) {
     assert.ok(joined.includes(label), "panel row shows the real title: " + label);
   }
   h.unmount();
