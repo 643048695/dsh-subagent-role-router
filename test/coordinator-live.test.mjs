@@ -9,7 +9,7 @@ import { apply } from "../lib/index.js";
 // answers back off the plugin's own HTTP surface. It is the only place that
 // proves the three layers agree: schema field → getSection view → routing.
 
-function harness(overrides = {}) {
+function harness(overrides = {}, services = {}) {
 	let spawnSeq = 0;
 	const listens = new Map();
 	const cleanups = [];
@@ -79,7 +79,9 @@ function harness(overrides = {}) {
 			}
 			if (names.includes("subagents")) fn({ ...ctx, subagents });
 		},
-		get() {
+		get(key) {
+			if (key === 'llm') return services.llm;
+			if (key === 'agents') return services.agents;
 			return undefined;
 		}
 	};
@@ -213,4 +215,68 @@ test("a flat spec from an ordinary child gets the general route at birth too", a
 	h.spawnFlat({ label: "随便做点什么", prompt: "随便做点什么", parent: { id: "session-p" } });
 	const spec = h.specs[0];
 	assert.equal(spec.agentOptions && spec.agentOptions.model, "general-a");
+});
+
+// ── the auxiliary judge, through the REAL spawn seam ────────────────────────
+//
+// The unit suite drives `runCoordinatorJudge`; these two prove the WIRING: the
+// judge is scheduled AFTER the receipt, the spawn never waits for it, and a
+// switched-off judge costs no model call at all.
+
+function fakeJudge(text, calls = []) {
+	return {
+		stream(options) {
+			calls.push(options);
+			return (async function* () {
+				yield { type: "text-delta", index: 0, text };
+				yield { type: "finish", reason: { kind: "complete" } };
+			})();
+		}
+	};
+}
+
+function unstartedChild(id) {
+	return { id, session: { requestContext: () => undefined, events: [] } };
+}
+
+test("the judge corrects a rule verdict AFTER birth — the spawn itself is unchanged", async () => {
+	const calls = [];
+	const h = harness(
+		{ judgeEnabled: true, judgeProvider: "judge-p", judgeModel: "judge-m" },
+		{
+			llm: fakeJudge(JSON.stringify({ correct: false, group: "ui", confidence: 0.9 }), calls),
+			agents: { get: () => unstartedChild("child-1") }
+		}
+	);
+	// The rules say backend (数据库/迁移/脚本); the birth route proves the sync
+	// decision already happened before the judge was even called.
+	h.spawn({ prompt: "修复数据库迁移脚本", label: "修复数据库迁移脚本", parent: { id: "session-p" }, agentPreset: "dsh-orchestrator-worker" });
+	assert.equal(routeOf(h.specs[0]).model, "be-a", "birth used the rule verdict synchronously");
+
+	// Let the deferred judge run; nothing was cancelled or restarted.
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	assert.equal(h.specs.length, 1, "no re-dispatch");
+
+	const page = await h.get("/subagent-role-router/whitelist?childId=child-1");
+	assert.equal(page.body.value.coordinator.group, "ui", "the ledger records the corrected group");
+	assert.deepEqual(page.body.value.desired.map((row) => row.model), ["ui-a", "ui-b"]);
+	assert.equal(page.body.value.judge.corrections, 1);
+	assert.equal(page.body.value.judge.last.source, "judge");
+	assert.equal(page.body.value.judge.last.corrected, true);
+	assert.equal(calls.length, 1, "exactly one judge call");
+	assert.equal(calls[0].model, "judge-m");
+});
+
+test("a switched-off judge costs zero model calls in the real spawn path", async () => {
+	const calls = [];
+	const h = harness(
+		{ judgeEnabled: false },
+		{ llm: fakeJudge(JSON.stringify({ correct: false, group: "ui", confidence: 0.9 }), calls) }
+	);
+	h.spawn({ prompt: "修复数据库迁移脚本", label: "修复数据库迁移脚本", parent: { id: "session-p" }, agentPreset: "dsh-orchestrator-worker" });
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	assert.equal(calls.length, 0);
+	const page = await h.get("/subagent-role-router/whitelist?childId=child-1");
+	assert.equal(page.body.value.coordinator.group, "backend");
+	assert.equal(page.body.value.judge.enabled, false);
 });

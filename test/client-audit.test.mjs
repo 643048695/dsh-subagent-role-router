@@ -989,3 +989,304 @@ test("stop fallback stays quiet when the child really stopped", async () => {
   assert.equal(posts.length, 0);
   handle.dispose();
 });
+
+// ── settings-form interaction: merged picker, ordered rows, judge fields ────
+// The row is a React component, so a small stateful stub is enough to drive the
+// real onChange handlers and read back the rendered value. No browser, no new
+// dependency: the hooks are indexed exactly like the existing render tests.
+
+const CATALOG = [
+  { id: "magpie", name: "magpie", models: [{ id: "group/dnq", name: "group/dnq" }, { id: "group/1017", name: "group/1017" }] },
+  { id: "200k", name: "200k", models: [{ id: "jev-1.13-free", name: "JEV" }] }
+];
+
+function loadInteractiveClient() {
+  let captured = null;
+  const session = { slots: [], cursor: 0, effects: [], dirty: false };
+  const React = {
+    createElement(type, props, ...children) {
+      const kids = children.flat(Infinity).filter((child) => child !== null && child !== undefined && child !== false && child !== true);
+      return { type, props: props || {}, children: kids };
+    },
+    createPortal(node, target) { return { portal: true, node, target }; },
+    useRef(init) {
+      const at = session.cursor++;
+      if (!session.slots[at]) session.slots[at] = { kind: "ref", current: init };
+      return session.slots[at];
+    },
+    useState(init) {
+      const at = session.cursor++;
+      if (!session.slots[at]) {
+        session.slots[at] = { kind: "state", value: typeof init === "function" ? init() : init };
+      }
+      const slot = session.slots[at];
+      const set = (next) => {
+        const value = typeof next === "function" ? next(slot.value) : next;
+        if (Object.is(value, slot.value)) return;
+        slot.value = value;
+        session.dirty = true;
+      };
+      return [slot.value, set];
+    },
+    useEffect(fn, deps) {
+      session.effects.push({ at: session.cursor++, fn, deps });
+    },
+    useMemo(fn) { return fn(); }
+  };
+  const sandbox = {
+    window: {
+      __ModuleLoader__: { load(module) { captured = module; } },
+      addEventListener() {}, removeEventListener() {},
+      location: { href: "http://localhost/" }
+    },
+    document: {
+      hidden: false, body: {},
+      querySelector: () => null, querySelectorAll: () => [],
+      getComputedStyle: () => ({}),
+      createElement: () => ({ dataset: {}, setAttribute() {}, textContent: "" }),
+      head: { appendChild() {} },
+      addEventListener() {}, removeEventListener() {}
+    },
+    console,
+    fetch: async () => ({ json: async () => ({ ok: false }) }),
+    setTimeout: () => 0, clearTimeout() {},
+    setInterval: () => 0, clearInterval() {}
+  };
+  vm.runInNewContext(clientSource, sandbox, { filename: "client.js" });
+  if (!captured || typeof captured.factory !== "function") throw new Error("client.js failed to register");
+  const client = captured.factory((id) => {
+    if (id === "react") return React;
+    if (id === "react-dom") return { createPortal: React.createPortal };
+    if (id === "@deepseek-ai/dsh-client-ui-primitives") return { Toast: function Toast() {} };
+    return {};
+  });
+
+  const handle = {
+    client,
+    session,
+    props: null,
+    current: null,
+    draw(props) {
+      session.cursor = 0;
+      session.effects = [];
+      const tree = client.SubagentModelRow(props);
+      for (const effect of session.effects) {
+        const slot = session.slots[effect.at] || (session.slots[effect.at] = {});
+        const changed = !slot.deps || !effect.deps
+          || effect.deps.length !== slot.deps.length
+          || effect.deps.some((dep, i) => !Object.is(dep, slot.deps[i]));
+        if (!changed) continue;
+        if (typeof slot.cleanup === "function") slot.cleanup();
+        slot.deps = effect.deps ? Array.from(effect.deps) : null;
+        const cleanup = effect.fn();
+        slot.cleanup = typeof cleanup === "function" ? cleanup : null;
+      }
+      return tree;
+    },
+    act(fn) {
+      if (fn) fn();
+      let guard = 0;
+      while (session.dirty && guard < 100) {
+        session.dirty = false;
+        this.current = this.draw(this.props);
+        guard += 1;
+      }
+      return this.current;
+    },
+    async render(props, config) {
+      this.props = props;
+      this.current = this.draw(props);
+      this.act();
+      await flush();
+      this.act();
+      assert.ok(this.current, "the settings row must render a tree");
+      return this.current;
+    }
+  };
+  function makeProps(config, written = []) {
+    const scopeValue = Object.assign({}, config);
+    const scope = {
+      status: "ready", writable: true, revision: 1,
+      getSnapshot() { return { status: "ready", value: scopeValue, writable: true, revision: 1 }; },
+      subscribe() { return () => {}; },
+      savedForm() { return null; },
+      setSavedForm() {}, clearSavedForm() {},
+      refresh() { return Promise.resolve(); }
+    };
+    return {
+      t: (key) => key,
+      settingsScope: scope,
+      loadCatalog: () => Promise.resolve(CATALOG),
+      write: async (value) => { written.push(value); Object.assign(scopeValue, value); return "test"; }
+    };
+  }
+  handle.makeProps = makeProps;
+  return handle;
+}
+
+const flush = async () => { for (let i = 0; i < 12; i += 1) await Promise.resolve(); };
+
+function allNodes(node, predicate, out = []) {
+  if (!node || typeof node !== "object") return out;
+  if (Array.isArray(node)) { node.forEach((child) => allNodes(child, predicate, out)); return out; }
+  if (node.portal) return allNodes(node.node, predicate, out);
+  if (predicate(node)) out.push(node);
+  (node.children || []).forEach((child) => allNodes(child, predicate, out));
+  return out;
+}
+const byData = (key, value) => (node) => node.props && node.props[key] === value;
+const byClass = (name) => (node) => typeof node.props?.className === "string" && node.props.className.split(/\s+/).includes(name);
+function nodeText(node) {
+  if (node === null || node === undefined || node === false || node === true) return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(nodeText).join("");
+  return (node.children || []).map(nodeText).join("");
+}
+function openSection(handle, tree, label) {
+  const head = allNodes(tree, (node) => node.type === "button" && byClass("dsm-acc-head")(node) && nodeText(node).includes(label))[0];
+  assert.ok(head, "missing section header: " + label);
+  return handle.act(head.props.onClick);
+}
+function saveButton(tree) {
+  const button = allNodes(tree, (node) => node.type === "button" && nodeText(node) === "row.save")[0];
+  assert.ok(button, "save button missing");
+  return button;
+}
+
+test("merged model select writes provider and model together and clears reasoning effort", async () => {
+  const h = loadInteractiveClient();
+  const written = [];
+  const props = h.makeProps({
+    models: [{ provider: "magpie", model: "group/dnq", reasoningEffort: "high" }]
+  }, written);
+  const tree = await h.render(props);
+  const row = allNodes(tree, byClass("dsm-row"))[0];
+  assert.ok(row, "the base pool must render a row");
+  h.act(row.props.onClick);
+
+  const routeSelect = allNodes(h.current, byData("data-route-select", "list:0"))[0];
+  assert.ok(routeSelect, "the two selects must be merged into one route select");
+  assert.equal(routeSelect.props.value, h.client.routeKeyOf("magpie", "group/dnq"));
+  const optionTexts = allNodes(routeSelect, (node) => node.type === "option").map(nodeText);
+  assert.ok(optionTexts.includes("magpie · group/dnq"), "option text must carry the provider prefix");
+  assert.ok(allNodes(routeSelect, (node) => node.type === "optgroup").length >= 2, "options must be grouped by provider");
+  const effortSelect = allNodes(h.current, byData("data-effort-select", "list:0"))[0];
+  assert.equal(effortSelect.props.value, "high", "precondition: a saved effort is shown");
+
+  routeSelect.props.onChange({ target: { value: h.client.routeKeyOf("magpie", "group/1017") } });
+  h.act();
+  assert.equal(allNodes(h.current, byData("data-route-select", "list:0"))[0].props.value, "magpie\u0000group/1017");
+  assert.equal(allNodes(h.current, byData("data-effort-select", "list:0"))[0].props.value, "", "changing model forgets the effort");
+
+  saveButton(h.current).props.onClick();
+  await flush();
+  h.act();
+  assert.equal(written.length, 1, "Save must submit exactly one form value");
+  assert.equal(written[0].provider, "magpie");
+  assert.deepEqual(Array.from(written[0].models), ["group/1017"]);
+  assert.equal(Object.prototype.hasOwnProperty.call(written[0], "reasoningEffort"), false);
+});
+
+test("a route missing from the catalog stays the first option and survives save", async () => {
+  const h = loadInteractiveClient();
+  const written = [];
+  const props = h.makeProps({
+    models: [{ provider: "legacy-provider", model: "hand typed/model", reasoningEffort: "high" }]
+  }, written);
+  const tree = await h.render(props);
+  const row = allNodes(tree, byClass("dsm-row"))[0];
+  h.act(row.props.onClick);
+  const select = allNodes(h.current, byData("data-route-select", "list:0"))[0];
+  assert.equal(select.props.value, "legacy-provider\u0000hand typed/model", "the selected value must exist in the DOM");
+  const options = allNodes(select, (node) => node.type === "option");
+  assert.equal(nodeText(options[0]), "row.inherit", "the inherit option comes first");
+  assert.equal(nodeText(options[1]), "legacy-provider · hand typed/model", "the orphan is the first real option");
+
+  // Any edit marks the form dirty; the preserved route must still be submitted.
+  const failoverLabel = allNodes(h.current, (node) => byClass("dsm-toggle")(node) && nodeText(node).includes("row.failoverEnabled"))[0];
+  assert.ok(failoverLabel, "failover toggle missing");
+  const failover = allNodes(failoverLabel, (node) => node.type === "input")[0];
+  h.act(() => failover.props.onChange({ target: { checked: false } }));
+  saveButton(h.current).props.onClick();
+  await flush();
+  h.act();
+  assert.equal(written.length, 1);
+  assert.equal(written[0].provider, "legacy-provider");
+  assert.deepEqual(JSON.parse(JSON.stringify(written[0].models)), [
+    { provider: "legacy-provider", model: "hand typed/model", reasoningEffort: "high" }
+  ]);
+});
+
+test("one-click top moves the last ordered row first and greys the right buttons", async () => {
+  const h = loadInteractiveClient();
+  const routes = ["a", "b", "c"].map((name) => ({ provider: "magpie", model: "group/" + name, reasoningEffort: "" }));
+  const props = h.makeProps({
+    coordinatorEnabled: true,
+    coordinatorUiModels: routes
+  });
+  let tree = await h.render(props);
+  tree = openSection(h, tree, "coord.title");
+
+  const rows = allNodes(tree, byClass("dsm-row-ordered"));
+  assert.equal(rows.length, 3);
+  const tops = () => allNodes(h.current, (node) => node.type === "button" && node.props["aria-label"] === "coord.moveToTop");
+  const ups = () => allNodes(h.current, (node) => node.type === "button" && node.props["aria-label"] === "coord.moveUp");
+  const downs = () => allNodes(h.current, (node) => node.type === "button" && node.props["aria-label"] === "coord.moveDown");
+  assert.deepEqual(tops().map((button) => button.props.disabled === true), [true, false, false]);
+  assert.deepEqual(ups().map((button) => button.props.disabled === true), [true, false, false]);
+  assert.deepEqual(downs().map((button) => button.props.disabled === true), [false, false, true]);
+
+  h.act(() => tops()[2].props.onClick({ stopPropagation() {} }));
+  const titles = allNodes(h.current, byClass("dsm-row-title")).map(nodeText);
+  assert.deepEqual(titles, ["group/c", "group/a", "group/b"], "the last row is now first");
+  assert.deepEqual(tops().map((button) => button.props.disabled === true), [true, false, false]);
+  assert.deepEqual(ups().map((button) => button.props.disabled === true), [true, false, false]);
+  assert.deepEqual(downs().map((button) => button.props.disabled === true), [false, false, true]);
+  assert.ok(allNodes(h.current, (node) => byClass("dsm-icon-btn-move")(node)).length >= 9, "move buttons carry the enlarged target class");
+});
+
+test("judge fields enter the form, mark it dirty, and land in the submitted value", async () => {
+  const h = loadInteractiveClient();
+  const written = [];
+  // No judge keys at all: the form must still show the documented default pair.
+  const props = h.makeProps({}, written);
+  let tree = await h.render(props);
+  tree = openSection(h, tree, "nav.other");
+  const card = allNodes(tree, byData("data-judge-card", "1"))[0];
+  assert.ok(card, "the task judgement block must be in the settings panel");
+  const select = allNodes(card, byData("data-route-select", "judge"))[0];
+  assert.ok(select, "judge model uses the same merged picker");
+  assert.equal(select.props.value, "200k\u0000jev-1.13-free");
+  assert.ok(allNodes(select, (node) => node.type === "option").some((node) => nodeText(node) === "200k · JEV"));
+  assert.equal(allNodes(h.current, byData("data-judge-hint", "1")).length, 0, "the hint is hidden while the judge is off");
+
+  const enabled = allNodes(card, byData("data-judge-field", "judgeEnabled"))[0];
+  const autoCorrect = allNodes(card, byData("data-judge-field", "judgeAutoCorrect"))[0];
+  h.act(() => enabled.props.onChange({ target: { checked: true } }));
+  assert.equal(saveButton(h.current).props.disabled, false, "a judge toggle marks the form dirty");
+  assert.equal(allNodes(h.current, byData("data-judge-hint", "1")).length, 1, "the hint appears only while enabled");
+  h.act(() => autoCorrect.props.onChange({ target: { checked: true } }));
+  allNodes(h.current, byData("data-route-select", "judge"))[0]
+    .props.onChange({ target: { value: h.client.routeKeyOf("magpie", "group/dnq") } });
+  h.act();
+
+  saveButton(h.current).props.onClick();
+  await flush();
+  h.act();
+  assert.equal(written.length, 1);
+  assert.equal(written[0].judgeEnabled, true);
+  assert.equal(written[0].judgeAutoCorrect, true);
+  assert.equal(written[0].judgeProvider, "magpie");
+  assert.equal(written[0].judgeModel, "group/dnq");
+
+  // Same four keys on the actual write path, not just the component payload.
+  const fields = [];
+  const scope = {
+    getSnapshot: () => ({ status: "ready", value: {}, writable: true }),
+    setMany(pairs) { fields.push(...pairs); return true; }
+  };
+  await h.client.persistDefaultModels(scope, written[0]);
+  for (const key of ["judgeEnabled", "judgeAutoCorrect", "judgeProvider", "judgeModel"]) {
+    assert.ok(fields.some((pair) => pair[0] === key), "persistDefaultModels must write " + key);
+  }
+});

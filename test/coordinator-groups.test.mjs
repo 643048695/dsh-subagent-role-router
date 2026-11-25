@@ -100,15 +100,19 @@ test('an explicit 【后端】 tag beats every keyword', () => {
 test('without a tag the words decide, and the evidence names them', () => {
   const ui = classifyCoordinatorTask('给设置页画个 SVG 动画', '');
   assert.equal(ui.group, 'ui');
-  assert.equal(ui.reason, 'keyword');
+  assert.equal(ui.reason, 'score');
   assert.match(ui.evidence, /svg|动画/);
+  assert.match(ui.evidence, /视觉词/);
   const backend = classifyCoordinatorTask('修复数据库迁移脚本', '');
   assert.equal(backend.group, 'backend');
+  assert.equal(backend.reason, 'score');
   assert.match(backend.evidence, /数据库|迁移/);
 });
 
 test('a tie or no evidence at all falls back to backend', () => {
-  assert.equal(classifyCoordinatorTask('改一下 svg 的接口', '').group, 'backend');
+  // A真 tie: one visual word (3 × 2 = 6) against three delivery words (1 × 2
+  // each = 6). Neither may win without a 2-point lead.
+  assert.equal(classifyCoordinatorTask('样式 打包 上传 归档', '').group, 'backend');
   assert.equal(classifyCoordinatorTask('随便做点什么', '').group, 'backend');
   assert.equal(classifyCoordinatorTask('', '').reason, 'default');
 });
@@ -305,7 +309,12 @@ test('getSection exposes every coordinator field (a schema field missing there i
     'coordinatorCooldownPreset',
     'coordinatorCooldownSteps',
     'coordinatorCooldownCap',
-    'coordinatorNoFallback'
+    'coordinatorNoFallback',
+    'judgeEnabled',
+    'judgeProvider',
+    'judgeModel',
+    'judgeTimeoutMs',
+    'judgeAutoCorrect'
   ]) {
     assert.ok(source.includes(field + ': unwrap(raw.' + field + ')'), 'getSection must expose ' + field);
   }
@@ -415,4 +424,74 @@ test('all three lists reserve their routes and reach the gate', () => {
   assert.ok(gate.includes('research-a'), 'the host gate approves it for the coordinator child');
   assert.deepEqual(coordinatorGroupRoutes(live, 'research').map((route) => route.model), ['research-a']);
   assert.equal(isCoordinatorRoute(live, { provider: 'magpie', model: 'research-a' }), true);
+});
+
+// ── 5. the full-text score (title + body together) ──────────────────────────
+//
+// The old rule let the TITLE decide on its own and only consulted the body when
+// the title was silent. Live evidence: 「【UI】…验收」 fell through to the delivery
+// list because 「验收」 matched there and the title "had an answer". The score
+// below weighs one visual word at 3, research/backend at 2 and delivery at 1,
+// requires ≥ 4 points and a ≥ 2 point lead, and otherwise falls back to backend.
+
+test('a 【UI】 task with 验收 in it stays UI (the live incident)', () => {
+  // The exact shape that misrouted a child onto group/dnq instead of 4hydrogen.
+  const labelled = classifyCoordinatorTask('【UI】界面验收：把设置页的配色和布局调到验收标准', '打包上传 5.99 到线上');
+  assert.equal(labelled.group, 'ui');
+  assert.equal(labelled.reason, 'tag');
+  // Without a tag the words still win: 界面(6) + 配色(6) + 布局(6) 对 验收(2).
+  const byWords = classifyCoordinatorTask('界面验收与视觉核对', '');
+  assert.equal(byWords.group, 'ui');
+  assert.equal(byWords.reason, 'score');
+  assert.match(byWords.evidence, /视觉词 \d+/);
+  assert.match(byWords.evidence, /打平|>/);
+});
+
+test('a pure delivery chore still lands on the delivery list', () => {
+  assert.equal(classifyCoordinatorTask('打包上传 5.99 到线上', '').group, 'delivery');
+  assert.equal(classifyCoordinatorTask('构建并签名安装包', '').group, 'delivery');
+  assert.equal(classifyCoordinatorTask('发布 5.99', '').group, 'delivery');
+  assert.equal(classifyCoordinatorTask('重跑回归测试并回执', '').group, 'delivery');
+});
+
+test('a pure backend task still lands on the backend list', () => {
+  assert.equal(classifyCoordinatorTask('修复数据库迁移脚本', '').group, 'backend');
+  assert.equal(classifyCoordinatorTask('修复登录超时', '').group, 'backend');
+  assert.equal(classifyCoordinatorTask('重构缓存队列的并发锁', '').group, 'backend');
+});
+
+test('a read-only audit still lands on the research list', () => {
+  assert.equal(classifyCoordinatorTask('审计后端漏洞用户系统与服务器安全', '').group, 'research');
+  assert.equal(classifyCoordinatorTask('盘点表盘内容供给与合规缺口', '').group, 'research');
+  assert.equal(classifyCoordinatorTask('读一下源码，梳理清楚调用链', '').group, 'research');
+  // Saying 只读 keeps the audit even when the SUBJECT is visual: an audit of
+  // animation teaching material must not be routed to a drawing model.
+  assert.equal(classifyCoordinatorTask('设备扩张P0+P1代码能力与动画教学缺口只读盘点', '').group, 'research');
+});
+
+test('a directive outranks the score and the tag', () => {
+  const uiTagBackendDirective = classifyCoordinatorTask('【UI】打包上传 5.99 到线上', '组：后端处理');
+  assert.equal(uiTagBackendDirective.group, 'backend');
+  assert.equal(uiTagBackendDirective.reason, 'directive');
+  const deliveryDirective = classifyCoordinatorTask('界面验收', 'group: delivery');
+  assert.equal(deliveryDirective.group, 'delivery');
+  assert.equal(deliveryDirective.reason, 'directive');
+});
+
+test('the body really participates in the score, the title no longer decides alone', () => {
+  // The title carries no signal at all; the body names the visual work.
+  const bodyOnly = classifyCoordinatorTask('处理一下', '把登录页的配色和布局调一下，再补一张截图');
+  assert.equal(bodyOnly.group, 'ui', bodyOnly.evidence);
+  // …and a visual title still wins over a body full of change/backend words.
+  const titleWins = classifyCoordinatorTask('画个设置页图标', '修复接口的缓存问题');
+  assert.equal(titleWins.group, 'ui', titleWins.evidence);
+});
+
+test('a tag counts anywhere in the body, not only at its start', () => {
+  // The dispatcher writes the tag inside the task text far more often than in
+  // the label (34 live dispatches: 1 labelled). It must be found mid-string.
+  const midBody = classifyCoordinatorTask('打包上传 5.99 到线上', '这一单先做，【UI】顺手把图标画出来');
+  assert.equal(midBody.group, 'ui');
+  assert.equal(midBody.reason, 'tag');
+  assert.equal(midBody.evidence, '描述命中【UI】');
 });

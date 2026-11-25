@@ -23,6 +23,27 @@ test('schema: role pool fields exist with the documented defaults', () => {
   assert.equal(read(resolved.roleSlotCooldownSeconds), 15)
 })
 
+test('schema: the auxiliary judge fields exist with the documented defaults', () => {
+  const resolved = Config({})
+  assert.equal(read(resolved.judgeEnabled), true)
+  assert.equal(read(resolved.judgeProvider), '200k')
+  assert.equal(read(resolved.judgeModel), 'jev-1.13-free')
+  assert.equal(read(resolved.judgeTimeoutMs), 3000)
+  assert.equal(read(resolved.judgeAutoCorrect), true)
+  const off = Config({
+    judgeEnabled: false,
+    judgeProvider: 'custom-p',
+    judgeModel: 'custom-m',
+    judgeTimeoutMs: 1200,
+    judgeAutoCorrect: false
+  })
+  assert.equal(read(off.judgeEnabled), false)
+  assert.equal(read(off.judgeProvider), 'custom-p')
+  assert.equal(read(off.judgeModel), 'custom-m')
+  assert.equal(read(off.judgeTimeoutMs), 1200)
+  assert.equal(read(off.judgeAutoCorrect), false)
+})
+
 test('schema: a pool entry without reasoningEffort is accepted (UI shape)', () => {
   // The settings card serialises an entry that names no effort WITHOUT the key.
   // MODEL_ENTRY would reject this; POOL_ENTRY must not.
