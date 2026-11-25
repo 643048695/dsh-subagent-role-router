@@ -1251,7 +1251,8 @@ test("judge fields enter the form, mark it dirty, and land in the submitted valu
   // No judge keys at all: the form must still show the documented default pair.
   const props = h.makeProps({}, written);
   let tree = await h.render(props);
-  tree = openSection(h, tree, "nav.other");
+  // Its own accordion row: a buried card in "其它" was impossible to find.
+  tree = openSection(h, tree, "judge.title");
   const card = allNodes(tree, byData("data-judge-card", "1"))[0];
   assert.ok(card, "the task judgement block must be in the settings panel");
   const select = allNodes(card, byData("data-route-select", "judge"))[0];

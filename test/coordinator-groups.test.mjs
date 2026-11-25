@@ -454,6 +454,14 @@ test('a pure delivery chore still lands on the delivery list', () => {
   assert.equal(classifyCoordinatorTask('重跑回归测试并回执', '').group, 'delivery');
 });
 
+test('a change that also ships stays one backend chain', () => {
+  // Integration is a change: shipping it afterwards does not make it a delivery
+  // chore (the same rule as 「改完再传」).
+  assert.equal(classifyCoordinatorTask('接口联调并上线', '').group, 'backend');
+  assert.equal(classifyCoordinatorTask('对接支付接口后发布', '').group, 'backend');
+  assert.equal(classifyCoordinatorTask('联调完上传验收', '').group, 'backend');
+});
+
 test('a pure backend task still lands on the backend list', () => {
   assert.equal(classifyCoordinatorTask('修复数据库迁移脚本', '').group, 'backend');
   assert.equal(classifyCoordinatorTask('修复登录超时', '').group, 'backend');
