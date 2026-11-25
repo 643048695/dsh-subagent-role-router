@@ -4,6 +4,12 @@
 
 **本项目是 [dingminhua/dsh-subagent-default-model](https://github.com/dingminhua/dsh-subagent-default-model)（MIT，Copyright (c) 2026 LaoDing）的衍生作品。** 3.0.0 之前的条目由原作撰写，其中的功能、修复与测试记录均属原作工作；本项目的改动从 **3.0.0** 起记录。
 
+## 5.14.1 (2026-11-26)
+
+### Fixed
+
+- Windows CI 的临时目录清理偶发 `ENOTEMPTY`（文件还被宿主短暂占用），会把整套测试判失败；清理改为重试，并对残留目录容忍——它只在本机临时目录里，测试不再重读。
+
 ## 5.14.0 (2026-11-26)
 
 ### Added

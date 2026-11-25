@@ -39,7 +39,15 @@ const {
 } = router;
 
 after(() => {
-  rmSync(BASE, { recursive: true, force: true });
+  // Windows CI can still hold a file the harness opened moments ago, and the
+  // cleanup then fails with ENOTEMPTY/EPERM. Retry, and let a leftover temp
+  // directory go rather than fail the suite: the directory is under the OS
+  // temp root and carries no state this test reads again.
+  try {
+    rmSync(BASE, { recursive: true, force: true, maxRetries: 20, retryDelay: 25 });
+  } catch (error) {
+    if (!["ENOTEMPTY", "EPERM", "EACCES", "EBUSY"].includes(error?.code)) throw error;
+  }
 });
 
 const magpie = (model, effort) => ({
