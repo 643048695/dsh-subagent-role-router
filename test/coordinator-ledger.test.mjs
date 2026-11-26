@@ -344,6 +344,27 @@ test('a disagreeing judge corrects the route before the first request', async ()
   assert.equal(diag.last.rulesGroup, 'backend');
 });
 
+test('the judge reviews a WRONG tag too, not only a guessed group', async () => {
+  // The live incident this switch exists for: a UI brief labelled 【后端】 ran
+  // on a text model because the label was trusted. A tag is a one-word guess
+  // the dispatcher writes, so the judge gets the last word on it.
+  const live = judgeState();
+  const ctx = judgeCtx({ answer: UI_VERDICT, agent: freshChild() });
+  const wrongTag = { group: 'backend', reason: 'tag', evidence: '描述命中【后端】' };
+  await runCoordinatorJudge(ctx, live, CHILD, wrongTag, '【后端】把设置页的配色调好', '');
+
+  assert.equal(live.childRoutes.get(CHILD).provider, 'magpie-anthropic');
+  const record = live.coordGroupOfChild.get(CHILD);
+  assert.equal(record.group, 'ui');
+  assert.equal(record.reason, 'judge');
+  assert.equal(record.correctedFrom, 'backend');
+
+  // The tag reaches the judge as EVIDENCE, not as an instruction to trust it.
+  const prompt = ctx.calls[0].messages[0].content[0].text;
+  assert.match(prompt, /描述命中【后端】/, 'the rule evidence is attached');
+  assert.match(prompt, /标签只是派单方写的标记/, 'the judge is told a tag can be wrong');
+});
+
 test('the judge sees ONLY the child task text (boilerplate stripped)', async () => {
   const live = judgeState();
   const ctx = judgeCtx({ answer: UI_VERDICT, agent: freshChild() });
